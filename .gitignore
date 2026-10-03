@@ -1,0 +1,15 @@
+build/
+bin/
+out/
+.vs/
+*.user
+*.suo
+*.sln.docstates
+.vscode/
+compile_commands.json
+*.exe
+*.obj
+*.o
+*.a
+*.lib
+*.pdb
