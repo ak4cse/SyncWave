@@ -25,7 +25,11 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Decoupled `CommandInterface` and `DeviceManager` abstractions.
   - Test suite with string/HRESULT unit tests and hardware integration tests.
   - CLI command: `syncwave devices [--all]`
-- [ ] **Milestone 2 — Hot-Plug & Device Notifications** (`IMMNotificationClient`)
+- [x] **Milestone 2 — Hot-Plug & Device Notifications** (`IMMNotificationClient`)
+  - Real-time detection of endpoint added, removed, state changed, default changed, and property changed.
+  - Atomic COM reference counting and thread-safe MTA callback handling.
+  - Decoupled `DeviceEvent` queue avoiding COM dependencies in CLI.
+  - CLI command: `syncwave watch [--timeout <sec>]`
 - [ ] **Milestone 3 — WASAPI Single Renderer & Test Tone**
 - [ ] **Milestone 4 — WASAPI Loopback Capture**
 - [ ] **Milestone 5 — Lock-Free Master Ring Buffer**
@@ -87,6 +91,15 @@ SyncWave Audio Devices
     ID:    {0.0.0.00000000}.{cafb0285-e226-4a55-91f6-be05aa5e8347}
 
 Total endpoints: 2
+```
+
+### Watch Audio Device Events in Real Time
+```powershell
+# Run device event monitor (hot-plug, default device change, disconnects)
+.\build\syncwave.exe watch
+
+# Or run with a timeout (in seconds)
+.\build\syncwave.exe watch --timeout 10
 ```
 
 ### Running Tests

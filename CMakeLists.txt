@@ -26,6 +26,8 @@ set(SYNCWAVE_SYSTEM_LIBS
 add_library(syncwave_core STATIC
     src/windows/DeviceManager.h
     src/windows/DeviceManager.cpp
+    src/windows/DeviceNotification.h
+    src/windows/DeviceNotification.cpp
     src/windows/ComHelper.h
 )
 

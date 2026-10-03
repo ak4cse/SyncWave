@@ -19,6 +19,7 @@ private:
     void printHelp() const;
     void printVersion() const;
     int handleDevicesCommand(const std::vector<std::string>& args);
+    int handleWatchCommand(const std::vector<std::string>& args);
 
     std::unique_ptr<DeviceManager> deviceManager_;
 };

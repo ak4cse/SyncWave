@@ -5,6 +5,7 @@
 #include <optional>
 #include <cstdint>
 #include <memory>
+#include <functional>
 
 namespace syncwave {
 
@@ -18,6 +19,16 @@ enum class DeviceState {
 
 std::string deviceStateToString(DeviceState state);
 
+enum class DeviceEventType {
+    Added,
+    Removed,
+    StateChanged,
+    DefaultChanged,
+    PropertyChanged
+};
+
+std::string deviceEventTypeToString(DeviceEventType type);
+
 struct AudioDevice {
     std::string id;
     std::string name;
@@ -29,6 +40,20 @@ struct AudioDevice {
         return deviceStateToString(state);
     }
 };
+
+struct DeviceEvent {
+    DeviceEventType type;
+    std::string deviceId;
+    DeviceState newState = DeviceState::Unknown;
+    std::optional<AudioDevice> device;
+    std::string details;
+
+    [[nodiscard]] std::string typeString() const {
+        return deviceEventTypeToString(type);
+    }
+};
+
+using DeviceEventCallback = std::function<void(const DeviceEvent&)>;
 
 class DeviceManager {
 public:
@@ -51,6 +76,15 @@ public:
 
     // Get a device by index from the latest enumeration
     [[nodiscard]] std::optional<AudioDevice> getDeviceByIndex(size_t index, bool activeOnly = false);
+
+    // Start listening for real-time Windows Core Audio endpoint notifications
+    bool startMonitoring(DeviceEventCallback callback);
+
+    // Stop listening for notifications
+    void stopMonitoring();
+
+    // Check if monitoring is currently active
+    [[nodiscard]] bool isMonitoring() const;
 
 private:
     struct Impl;

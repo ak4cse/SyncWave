@@ -1,4 +1,5 @@
 #include "DeviceManager.h"
+#include "DeviceNotification.h"
 #include "ComHelper.h"
 
 #include <windows.h>
@@ -8,6 +9,8 @@
 #include <wrl/client.h>
 #include <stdexcept>
 #include <iostream>
+#include <mutex>
+#include <atomic>
 
 using Microsoft::WRL::ComPtr;
 
@@ -21,6 +24,17 @@ std::string deviceStateToString(DeviceState state) {
         case DeviceState::Unplugged:  return "Unplugged";
         case DeviceState::Unknown:
         default:                      return "Unknown";
+    }
+}
+
+std::string deviceEventTypeToString(DeviceEventType type) {
+    switch (type) {
+        case DeviceEventType::Added:          return "Device Added";
+        case DeviceEventType::Removed:        return "Device Removed";
+        case DeviceEventType::StateChanged:   return "Device State Changed";
+        case DeviceEventType::DefaultChanged: return "Default Device Changed";
+        case DeviceEventType::PropertyChanged:return "Device Property Changed";
+        default:                              return "Unknown Event";
     }
 }
 
@@ -103,9 +117,14 @@ static std::optional<AudioDevice> buildAudioDeviceFromEndpoint(
     return device;
 }
 
-struct DeviceManager::Impl {
+struct DeviceManager::Impl : public INotificationListener {
     ComInitializer comInit;
     ComPtr<IMMDeviceEnumerator> pEnumerator;
+    ComPtr<DeviceNotificationClient> pNotificationClient;
+
+    std::mutex callbackMutex;
+    DeviceEventCallback eventCallback;
+    std::atomic<bool> isMonitoring_{false};
 
     Impl() {
         if (!comInit.succeeded()) {
@@ -123,6 +142,10 @@ struct DeviceManager::Impl {
             std::string err = "Failed to create MMDeviceEnumerator instance: " + formatHResult(hr);
             throw std::runtime_error(err);
         }
+    }
+
+    ~Impl() override {
+        stopMonitoring();
     }
 
     std::string getDefaultDeviceId() const {
@@ -143,6 +166,145 @@ struct DeviceManager::Impl {
         std::string defaultId = wideToUtf8(pstrId);
         CoTaskMemFree(pstrId);
         return defaultId;
+    }
+
+    std::optional<AudioDevice> getDeviceById(const std::string& id) {
+        if (!pEnumerator || id.empty()) {
+            return std::nullopt;
+        }
+
+        std::wstring wid = utf8ToWide(id);
+        ComPtr<IMMDevice> pDevice;
+        HRESULT hr = pEnumerator->GetDevice(wid.c_str(), &pDevice);
+        if (FAILED(hr) || !pDevice) {
+            return std::nullopt;
+        }
+
+        std::string defaultId = getDefaultDeviceId();
+        return buildAudioDeviceFromEndpoint(pDevice.Get(), defaultId);
+    }
+
+    bool startMonitoring(DeviceEventCallback callback) {
+        if (isMonitoring_.load(std::memory_order_acquire)) {
+            return true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            eventCallback = std::move(callback);
+        }
+
+        auto* client = new DeviceNotificationClient(this);
+        pNotificationClient.Attach(client);
+
+        HRESULT hr = pEnumerator->RegisterEndpointNotificationCallback(pNotificationClient.Get());
+        if (FAILED(hr)) {
+            std::cerr << "Failed to register endpoint notification callback: " << formatHResult(hr) << "\n";
+            pNotificationClient.Reset();
+            return false;
+        }
+
+        isMonitoring_.store(true, std::memory_order_release);
+        return true;
+    }
+
+    void stopMonitoring() {
+        if (!isMonitoring_.exchange(false, std::memory_order_acq_rel)) {
+            return;
+        }
+
+        if (pNotificationClient) {
+            pNotificationClient->setListener(nullptr);
+            if (pEnumerator) {
+                pEnumerator->UnregisterEndpointNotificationCallback(pNotificationClient.Get());
+            }
+            pNotificationClient.Reset();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            eventCallback = nullptr;
+        }
+    }
+
+    void dispatchEvent(const DeviceEvent& event) {
+        DeviceEventCallback cb;
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex);
+            cb = eventCallback;
+        }
+        if (cb) {
+            cb(event);
+        }
+    }
+
+    // INotificationListener implementation
+    void onDeviceAdded(const std::string& deviceId) override {
+        auto dev = getDeviceById(deviceId);
+        DeviceEvent ev;
+        ev.type = DeviceEventType::Added;
+        ev.deviceId = deviceId;
+        ev.newState = dev ? dev->state : DeviceState::Active;
+        ev.device = dev;
+        ev.details = dev ? dev->name : "";
+        dispatchEvent(ev);
+    }
+
+    void onDeviceRemoved(const std::string& deviceId) override {
+        DeviceEvent ev;
+        ev.type = DeviceEventType::Removed;
+        ev.deviceId = deviceId;
+        ev.newState = DeviceState::NotPresent;
+        ev.device = std::nullopt;
+        ev.details = "";
+        dispatchEvent(ev);
+    }
+
+    void onDeviceStateChanged(const std::string& deviceId, DWORD newState) override {
+        DeviceState mapped = mapWindowsDeviceState(newState);
+        auto dev = getDeviceById(deviceId);
+        DeviceEvent ev;
+        ev.type = DeviceEventType::StateChanged;
+        ev.deviceId = deviceId;
+        ev.newState = mapped;
+        ev.device = dev;
+        ev.details = "State: " + deviceStateToString(mapped);
+        dispatchEvent(ev);
+    }
+
+    void onDefaultDeviceChanged(EDataFlow flow, ERole role, const std::string& defaultDeviceId) override {
+        if (flow != eRender) {
+            return;
+        }
+        if (role != eConsole && role != eMultimedia) {
+            return;
+        }
+
+        std::string roleName = (role == eConsole) ? "Console" : "Multimedia";
+        auto dev = getDeviceById(defaultDeviceId);
+        DeviceEvent ev;
+        ev.type = DeviceEventType::DefaultChanged;
+        ev.deviceId = defaultDeviceId;
+        ev.newState = dev ? dev->state : DeviceState::Active;
+        ev.device = dev;
+        ev.details = "Role: " + roleName;
+        dispatchEvent(ev);
+    }
+
+    void onPropertyValueChanged(const std::string& deviceId, const PROPERTYKEY& key) override {
+        auto dev = getDeviceById(deviceId);
+        std::string propName = "Property";
+        if (key.pid == PKEY_Device_FriendlyName.pid &&
+            InlineIsEqualGUID(key.fmtid, PKEY_Device_FriendlyName.fmtid)) {
+            propName = "FriendlyName";
+        }
+        DeviceEvent ev;
+        ev.type = DeviceEventType::PropertyChanged;
+        ev.deviceId = deviceId;
+        ev.newState = dev ? dev->state : DeviceState::Unknown;
+        ev.device = dev;
+        ev.details = propName;
+        dispatchEvent(ev);
     }
 };
 
@@ -209,19 +371,10 @@ std::optional<AudioDevice> DeviceManager::getDefaultDevice() {
 }
 
 std::optional<AudioDevice> DeviceManager::getDeviceById(const std::string& id) {
-    if (!impl_ || !impl_->pEnumerator || id.empty()) {
+    if (!impl_) {
         return std::nullopt;
     }
-
-    std::wstring wid = utf8ToWide(id);
-    ComPtr<IMMDevice> pDevice;
-    HRESULT hr = impl_->pEnumerator->GetDevice(wid.c_str(), &pDevice);
-    if (FAILED(hr) || !pDevice) {
-        return std::nullopt;
-    }
-
-    std::string defaultId = impl_->getDefaultDeviceId();
-    return buildAudioDeviceFromEndpoint(pDevice.Get(), defaultId);
+    return impl_->getDeviceById(id);
 }
 
 std::optional<AudioDevice> DeviceManager::getDeviceByIndex(size_t index, bool activeOnly) {
@@ -230,6 +383,21 @@ std::optional<AudioDevice> DeviceManager::getDeviceByIndex(size_t index, bool ac
         return list[index];
     }
     return std::nullopt;
+}
+
+bool DeviceManager::startMonitoring(DeviceEventCallback callback) {
+    if (!impl_) return false;
+    return impl_->startMonitoring(std::move(callback));
+}
+
+void DeviceManager::stopMonitoring() {
+    if (impl_) {
+        impl_->stopMonitoring();
+    }
+}
+
+bool DeviceManager::isMonitoring() const {
+    return impl_ && impl_->isMonitoring_.load(std::memory_order_acquire);
 }
 
 } // namespace syncwave
