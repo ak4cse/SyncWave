@@ -4,6 +4,8 @@
 #include "../src/windows/WasapiOutput.h"
 #include "../src/audio/AudioFormat.h"
 #include "../src/audio/ToneGenerator.h"
+#include "../src/audio/RingBuffer.h"
+#include "../src/audio/MasterAudioBus.h"
 #include "../src/audio/AudioEngine.h"
 #include "../src/app/CommandInterface.h"
 
@@ -14,6 +16,7 @@
 #include <cmath>
 #include <thread>
 #include <chrono>
+#include <atomic>
 #include <initguid.h>
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -283,7 +286,6 @@ void testToneGenerator() {
     TEST_ASSERT(std::abs(gen.frequency() - 440.0) < 1e-6, "Initial frequency is 440 Hz");
     TEST_ASSERT(std::abs(gen.volume() - 0.25) < 1e-6, "Initial volume is 0.25");
 
-    // Bounds checking
     gen.setVolume(1.5);
     TEST_ASSERT(std::abs(gen.volume() - 1.0) < 1e-6, "Volume clamped to 1.0 maximum");
     gen.setVolume(-0.5);
@@ -294,7 +296,6 @@ void testToneGenerator() {
     gen.setFrequency(-10.0);
     TEST_ASSERT(std::abs(gen.frequency() - 1.0) < 1e-6, "Frequency clamped to 1.0 Hz minimum");
 
-    // Generate Float32 audio
     gen.setFrequency(440.0);
     gen.setVolume(0.5);
     gen.resetPhase();
@@ -310,7 +311,6 @@ void testToneGenerator() {
     std::vector<float> buffer(FRAME_COUNT * 2, 0.0f);
     gen.generateFrames(reinterpret_cast<uint8_t*>(buffer.data()), FRAME_COUNT, fmt);
 
-    // Verify all samples lie in [-0.5, +0.5] and are not all zero
     float maxAmp = 0.0f;
     bool inBounds = true;
     for (float s : buffer) {
@@ -324,13 +324,11 @@ void testToneGenerator() {
     TEST_ASSERT(inBounds, "All generated Float32 samples within [-0.5, +0.5] volume bounds");
     TEST_ASSERT(maxAmp > 0.45f, "Waveform reaches expected peak amplitude (> 0.45)");
 
-    // Test phase continuity across consecutive chunk generations
     double phase1 = gen.currentPhase();
     gen.generateFrames(reinterpret_cast<uint8_t*>(buffer.data()), FRAME_COUNT, fmt);
     double phase2 = gen.currentPhase();
     TEST_ASSERT(phase2 != phase1, "Phase advances continuously across consecutive chunks");
 
-    // Test Int16 generation
     syncwave::AudioFormat fmt16;
     fmt16.sampleRate = 48000;
     fmt16.channels = 2;
@@ -375,13 +373,10 @@ void testWasapiOutputIntegration() {
         TEST_ASSERT(output.state() == syncwave::OutputState::Initialized, "WasapiOutput in Initialized state");
 
         auto fmt = output.format();
-        std::cout << "    Hardware mix format: " << fmt.formatString() << "\n";
-        std::cout << "    Buffer size: " << output.bufferFrameCount() << " frames\n";
         TEST_ASSERT(fmt.sampleRate >= 44100, "Device sample rate is >= 44.1 kHz");
         TEST_ASSERT(fmt.channels >= 1, "Device channels is >= 1");
         TEST_ASSERT(output.bufferFrameCount() > 0, "Buffer frame count > 0");
 
-        // Render a brief 150ms test tone
         syncwave::ToneGenerator toneGen(440.0, 0.1);
         bool started = output.start([&](uint8_t* pBuf, uint32_t frames, const syncwave::AudioFormat& f) {
             toneGen.generateFrames(pBuf, frames, f);
@@ -393,11 +388,9 @@ void testWasapiOutputIntegration() {
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
 
         TEST_ASSERT(output.framesRendered() > 0, "Audio frames were rendered during playback");
-        std::cout << "    Frames rendered: " << output.framesRendered() << "\n";
 
         auto clock = output.getClockPosition();
         TEST_ASSERT(clock.second > 0, "IAudioClock frequency is reported and valid (> 0)");
-        std::cout << "    Clock position: " << clock.first << " frames/ticks (@ " << clock.second << " Hz)\n";
 
         output.stop();
         TEST_ASSERT(output.state() == syncwave::OutputState::Stopped, "WasapiOutput in Stopped state after stop()");
@@ -410,9 +403,219 @@ void testWasapiOutputIntegration() {
     }
 }
 
+void testRingBufferBasics() {
+    std::cout << "[TEST] RingBuffer Operations, Wraparound, and Bounds\n";
+
+    syncwave::RingBuffer rb(100, 2);
+    TEST_ASSERT(rb.capacityFrames() == 100, "RingBuffer capacity is 100 frames");
+    TEST_ASSERT(rb.channels() == 2, "RingBuffer channels is 2");
+    TEST_ASSERT(rb.availableToRead() == 0, "Initially availableToRead is 0");
+    TEST_ASSERT(rb.availableToWrite() == 100, "Initially availableToWrite is 100");
+
+    // Test empty read: should return 0, zero-fill destination, and increment underruns
+    std::vector<float> readBuf(20, 99.0f);
+    size_t readCount = rb.read(readBuf.data(), 10);
+    TEST_ASSERT(readCount == 0, "Reading from empty buffer returns 0 frames");
+    TEST_ASSERT(rb.underruns() == 10, "Underruns counter incremented by 10");
+    bool allZero = true;
+    for (float v : readBuf) {
+        if (v != 0.0f) allZero = false;
+    }
+    TEST_ASSERT(allZero, "Destination buffer zero-padded on underrun");
+
+    // Normal write and read (50 frames)
+    std::vector<float> writeData(50 * 2);
+    for (size_t i = 0; i < writeData.size(); ++i) {
+        writeData[i] = static_cast<float>(i + 1);
+    }
+    size_t written = rb.write(writeData.data(), 50);
+    TEST_ASSERT(written == 50, "Wrote 50 frames successfully");
+    TEST_ASSERT(rb.availableToRead() == 50, "availableToRead is now 50");
+    TEST_ASSERT(rb.availableToWrite() == 50, "availableToWrite is now 50");
+
+    std::vector<float> outData(50 * 2, 0.0f);
+    size_t readActual = rb.read(outData.data(), 50);
+    TEST_ASSERT(readActual == 50, "Read 50 frames successfully");
+    TEST_ASSERT(outData == writeData, "Read data matches written data exactly");
+    TEST_ASSERT(rb.availableToRead() == 0, "availableToRead is 0 after full read");
+
+    // Partial reads: write 40 frames, read 15, then read 25
+    std::vector<float> partialData(40 * 2);
+    for (size_t i = 0; i < partialData.size(); ++i) {
+        partialData[i] = static_cast<float>(i + 100);
+    }
+    rb.write(partialData.data(), 40);
+
+    std::vector<float> chunk1(15 * 2);
+    std::vector<float> chunk2(25 * 2);
+    rb.read(chunk1.data(), 15);
+    rb.read(chunk2.data(), 25);
+
+    bool matchChunk1 = std::equal(chunk1.begin(), chunk1.end(), partialData.begin());
+    bool matchChunk2 = std::equal(chunk2.begin(), chunk2.end(), partialData.begin() + 15 * 2);
+    TEST_ASSERT(matchChunk1, "First partial read (15 frames) matches expected data");
+    TEST_ASSERT(matchChunk2, "Second partial read (25 frames) matches expected data");
+
+    // Wraparound test:
+    // Currently read and write pointers are at 90. Write 40 frames (which wraps around 100 to 30)
+    std::vector<float> wrapData(40 * 2);
+    for (size_t i = 0; i < wrapData.size(); ++i) {
+        wrapData[i] = static_cast<float>(i + 500);
+    }
+    size_t wrapWritten = rb.write(wrapData.data(), 40);
+    TEST_ASSERT(wrapWritten == 40, "Write that wraps around ring buffer boundary succeeds");
+
+    std::vector<float> wrapRead(40 * 2);
+    size_t wrapReadCount = rb.read(wrapRead.data(), 40);
+    TEST_ASSERT(wrapReadCount == 40, "Read that wraps around ring buffer boundary succeeds");
+    TEST_ASSERT(wrapRead == wrapData, "Data read across wraparound matches written data exactly");
+
+    // Overrun test: capacity is 100, buffer is empty. Attempt to write 120 frames
+    std::vector<float> overData(120 * 2, 1.0f);
+    size_t overWritten = rb.write(overData.data(), 120);
+    TEST_ASSERT(overWritten == 100, "write capped at available capacity (100 frames)");
+    TEST_ASSERT(rb.overruns() == 20, "Overrun counter incremented by dropped frames (20)");
+
+    // Reset test
+    rb.reset();
+    TEST_ASSERT(rb.availableToRead() == 0, "availableToRead is 0 after reset");
+    TEST_ASSERT(rb.availableToWrite() == 100, "availableToWrite is 100 after reset");
+    TEST_ASSERT(rb.overruns() == 0, "Overruns reset to 0");
+    TEST_ASSERT(rb.underruns() == 0, "Underruns reset to 0");
+}
+
+void testRingBufferDataIntegrity() {
+    std::cout << "[TEST] RingBuffer Gradient Sequence Data Integrity\n";
+
+    syncwave::RingBuffer rb(256, 2);
+    constexpr size_t TOTAL_FRAMES = 5000;
+
+    std::vector<float> fullSource(TOTAL_FRAMES * 2);
+    for (size_t i = 0; i < TOTAL_FRAMES; ++i) {
+        fullSource[i * 2 + 0] = static_cast<float>(i) * 0.001f;
+        fullSource[i * 2 + 1] = static_cast<float>(i) * 0.001f + 0.0005f;
+    }
+
+    std::vector<float> fullDest(TOTAL_FRAMES * 2, 0.0f);
+
+    size_t framesWritten = 0;
+    size_t framesRead = 0;
+
+    // Write in chunks of 37 frames, read in chunks of 29 frames across many wraparounds
+    while (framesRead < TOTAL_FRAMES) {
+        if (framesWritten < TOTAL_FRAMES) {
+            size_t writeChunk = std::min<size_t>(37, TOTAL_FRAMES - framesWritten);
+            size_t w = rb.write(fullSource.data() + (framesWritten * 2), writeChunk);
+            framesWritten += w;
+        }
+
+        if (rb.availableToRead() > 0) {
+            size_t readChunk = std::min<size_t>(29, rb.availableToRead());
+            size_t r = rb.read(fullDest.data() + (framesRead * 2), readChunk);
+            framesRead += r;
+        }
+    }
+
+    TEST_ASSERT(framesWritten == TOTAL_FRAMES, "All 5000 frames written through gradient test");
+    TEST_ASSERT(framesRead == TOTAL_FRAMES, "All 5000 frames read through gradient test");
+
+    bool identical = true;
+    for (size_t i = 0; i < fullSource.size(); ++i) {
+        if (std::abs(fullSource[i] - fullDest[i]) > 1e-7f) {
+            identical = false;
+            break;
+        }
+    }
+    TEST_ASSERT(identical, "Gradient data integrity verified across multiple wraparounds");
+}
+
+void testRingBufferConcurrencyStress() {
+    std::cout << "[TEST] RingBuffer Multi-Threaded SPSC Concurrency Stress\n";
+
+    syncwave::RingBuffer rb(512, 1);
+    constexpr size_t TEST_FRAMES = 100000;
+
+    std::atomic<bool> producerDone{false};
+    std::vector<float> receivedFrames;
+    receivedFrames.reserve(TEST_FRAMES);
+
+    // Producer thread
+    std::thread producer([&]() {
+        size_t written = 0;
+        std::vector<float> chunk(64);
+        while (written < TEST_FRAMES) {
+            size_t count = std::min<size_t>(64, TEST_FRAMES - written);
+            for (size_t i = 0; i < count; ++i) {
+                chunk[i] = static_cast<float>(written + i);
+            }
+
+            size_t actual = rb.write(chunk.data(), count);
+            written += actual;
+            if (actual == 0) {
+                std::this_thread::yield();
+            }
+        }
+        producerDone.store(true, std::memory_order_release);
+    });
+
+    // Consumer thread
+    std::thread consumer([&]() {
+        std::vector<float> chunk(64);
+        while (!producerDone.load(std::memory_order_acquire) || rb.availableToRead() > 0) {
+            size_t avail = rb.availableToRead();
+            if (avail > 0) {
+                size_t toRead = std::min<size_t>(chunk.size(), avail);
+                size_t actual = rb.read(chunk.data(), toRead);
+                receivedFrames.insert(receivedFrames.end(), chunk.begin(), chunk.begin() + actual);
+            } else {
+                std::this_thread::yield();
+            }
+        }
+    });
+
+    producer.join();
+    consumer.join();
+
+    TEST_ASSERT(receivedFrames.size() == TEST_FRAMES, "Received exactly 100,000 frames without loss");
+
+    bool strictlyOrdered = true;
+    for (size_t i = 0; i < receivedFrames.size(); ++i) {
+        if (std::abs(receivedFrames[i] - static_cast<float>(i)) > 1e-6f) {
+            strictlyOrdered = false;
+            break;
+        }
+    }
+    TEST_ASSERT(strictlyOrdered, "All 100,000 frames received in strict FIFO order without corruption");
+}
+
+void testMasterAudioBusIntegration() {
+    std::cout << "[TEST] MasterAudioBus Abstraction and Tone Generator Routing\n";
+
+    auto canonFmt = syncwave::MasterAudioBus::canonicalFormat();
+    TEST_ASSERT(canonFmt.sampleRate == 48000, "Canonical master sample rate is 48000 Hz");
+    TEST_ASSERT(canonFmt.channels == 2, "Canonical master channels is 2");
+    TEST_ASSERT(canonFmt.isFloat(), "Canonical master format is Float32");
+
+    syncwave::MasterAudioBus bus(canonFmt, 4800); // 100ms capacity
+    TEST_ASSERT(bus.capacityFrames() == 4800, "MasterAudioBus capacity is 4800 frames");
+
+    syncwave::ToneGenerator toneGen(440.0, 0.25);
+    std::vector<float> synthChunk(480 * 2);
+    toneGen.generateFrames(reinterpret_cast<uint8_t*>(synthChunk.data()), 480, canonFmt);
+
+    size_t written = bus.write(synthChunk.data(), 480);
+    TEST_ASSERT(written == 480, "ToneGenerator wrote 480 frames to MasterAudioBus");
+    TEST_ASSERT(bus.availableFrames() == 480, "MasterAudioBus availableFrames is 480");
+
+    std::vector<float> destChunk(480 * 2, 0.0f);
+    size_t readFrames = bus.read(destChunk.data(), 480);
+    TEST_ASSERT(readFrames == 480, "MasterAudioBus read 480 frames");
+    TEST_ASSERT(destChunk == synthChunk, "Audio samples read from bus match generated tone samples");
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 3)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 4)   \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -424,6 +627,10 @@ int main() {
     testAudioFormat();
     testToneGenerator();
     testWasapiOutputIntegration();
+    testRingBufferBasics();
+    testRingBufferDataIntegrity();
+    testRingBufferConcurrencyStress();
+    testMasterAudioBusIntegration();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

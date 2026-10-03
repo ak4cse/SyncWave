@@ -17,7 +17,7 @@
 
 namespace syncwave {
 
-constexpr const char* SYNCWAVE_VERSION = "0.3.0-alpha";
+constexpr const char* SYNCWAVE_VERSION = "0.4.0-alpha";
 
 static std::atomic<bool> g_stopRequested{false};
 
@@ -44,7 +44,8 @@ void CommandInterface::printHelp() const {
     std::cout << "\nUsage:\n"
               << "  syncwave devices [--all]                   Enumerate audio output devices\n"
               << "  syncwave watch [--timeout <sec>]           Monitor audio endpoint changes in real time\n"
-              << "  syncwave tone [options]                    Play synthetic PCM sine wave on an audio device\n"
+              << "  syncwave tone [options]                    Play synthetic PCM sine wave through Master Audio Bus\n"
+              << "  syncwave status                            Display engine and master audio bus status\n"
               << "  syncwave help                              Show this help message\n"
               << "  syncwave --version                         Display version\n\n"
               << "Options for 'tone':\n"
@@ -205,10 +206,43 @@ int CommandInterface::handleWatchCommand(const std::vector<std::string>& args) {
     return 0;
 }
 
+int CommandInterface::handleStatusCommand(const std::vector<std::string>& /*args*/) {
+    auto diag = audioEngine_->getDiagnostics();
+
+    std::cout << "\nSYNCWAVE STATUS\n";
+    std::cout << "===============\n\n";
+
+    std::cout << "Engine:\n";
+    std::cout << "  State: " << (diag.isRunning ? "RUNNING" : "STOPPED") << "\n\n";
+
+    std::cout << "Master Audio Bus:\n";
+    std::cout << "  Format:    " << diag.masterFormat.formatString() << "\n";
+    std::cout << "  Capacity:  " << diag.busCapacityFrames << " frames\n";
+    std::cout << "  Available: " << diag.busAvailableFrames << " frames\n";
+    std::cout << "  Produced:  " << diag.busFramesWritten << " frames\n";
+    std::cout << "  Consumed:  " << diag.busFramesRead << " frames\n";
+    std::cout << "  Underruns: " << diag.busUnderruns << "\n";
+    std::cout << "  Overruns:  " << diag.busOverruns << "\n\n";
+
+    if (!diag.deviceName.empty()) {
+        std::cout << "Active Output:\n";
+        std::cout << "  Device:          " << diag.deviceName << "\n";
+        std::cout << "  State:           " << (diag.isRunning ? "RUNNING" : "STOPPED") << "\n";
+        std::cout << "  Format:          " << diag.format.formatString() << "\n";
+        std::cout << "  Buffer:          " << diag.bufferFrameCount << " frames\n";
+        std::cout << "  Frames rendered: " << diag.framesRendered << "\n";
+        std::cout << "  Underruns:       " << diag.outputUnderruns << "\n";
+        std::cout << "  Clock position:  " << diag.clockPosition << " frames (@ " 
+                  << diag.clockFrequency << " Hz)\n\n";
+    }
+
+    return 0;
+}
+
 int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
     std::string deviceSelector;
     double frequency = 440.0;
-    double duration = 5.0; // default 5 seconds
+    double duration = 5.0;
     double volume = 0.25;
 
     for (size_t i = 0; i < args.size(); ++i) {
@@ -223,7 +257,6 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
         }
     }
 
-    // Resolve target audio device
     std::optional<AudioDevice> targetDev;
     if (deviceSelector.empty()) {
         targetDev = deviceManager_->getDefaultDevice();
@@ -232,7 +265,6 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
             return 1;
         }
     } else {
-        // Check if selector is numeric index
         bool isIndex = !deviceSelector.empty() && 
                        std::all_of(deviceSelector.begin(), deviceSelector.end(), ::isdigit);
         if (isIndex) {
@@ -261,15 +293,14 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
     params.volume = volume;
     params.durationSec = duration;
 
-    std::cout << "\nSyncWave Tone Generator\n";
-    std::cout << "=======================\n\n";
+    std::cout << "\nSyncWave Tone Generator (Master Audio Bus Pipeline)\n";
+    std::cout << "===================================================\n\n";
     std::cout << "Device:\n";
     std::cout << "  Name:  " << targetDev->name << "\n";
     std::cout << "  ID:    " << targetDev->id << "\n\n";
 
     std::atomic<bool> deviceDisconnected{false};
 
-    // Monitor endpoint notifications to detect disconnection during playback
     deviceManager_->startMonitoring([&](const DeviceEvent& ev) {
         if (ev.deviceId == targetDev->id) {
             if (ev.type == DeviceEventType::Removed || 
@@ -281,18 +312,23 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
 
     bool started = audioEngine_->startTone(*targetDev, params);
     if (!started) {
-        std::cerr << "Error: Failed to start WASAPI playback on device '" << targetDev->name << "'.\n";
+        std::cerr << "Error: Failed to start playback through Master Audio Bus on device '" << targetDev->name << "'.\n";
         deviceManager_->stopMonitoring();
         return 1;
     }
 
     auto diag = audioEngine_->getDiagnostics();
 
-    std::cout << "Format:\n";
-    std::cout << "  Sample rate: " << diag.format.sampleRate << " Hz\n";
-    std::cout << "  Channels:    " << diag.format.channels << "\n";
-    std::cout << "  Format:      " << sampleTypeToString(diag.format.sampleType) 
-              << " (" << diag.format.bitsPerSample << "-bit)\n";
+    std::cout << "Pipeline Architecture:\n";
+    std::cout << "  ToneGenerator -> MasterAudioBus (RingBuffer) -> WasapiOutput -> Hardware\n\n";
+
+    std::cout << "Master Bus:\n";
+    std::cout << "  Format:      " << diag.masterFormat.formatString() << "\n";
+    std::cout << "  Capacity:    " << diag.busCapacityFrames << " frames (~" 
+              << (diag.busCapacityFrames * 1000 / diag.masterFormat.sampleRate) << " ms)\n\n";
+
+    std::cout << "Hardware Output:\n";
+    std::cout << "  Format:      " << diag.format.formatString() << "\n";
     std::cout << "  Buffer:      " << diag.bufferFrameCount << " frames\n\n";
 
     std::cout << "Tone:\n";
@@ -336,9 +372,17 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
     auto finalDiag = audioEngine_->getDiagnostics();
 
     std::cout << "\nPlayback complete.\n\n";
-    std::cout << "Frames rendered: " << finalDiag.framesRendered << "\n";
-    std::cout << "Underruns:       " << finalDiag.underruns << "\n";
-    std::cout << "Clock position:  " << finalDiag.clockPosition << " frames (@ " 
+    std::cout << "Master Audio Bus Telemetry:\n";
+    std::cout << "  Capacity:       " << finalDiag.busCapacityFrames << " frames\n";
+    std::cout << "  Frames produced:" << finalDiag.busFramesWritten << "\n";
+    std::cout << "  Frames consumed:" << finalDiag.busFramesRead << "\n";
+    std::cout << "  Bus underruns:  " << finalDiag.busUnderruns << "\n";
+    std::cout << "  Bus overruns:   " << finalDiag.busOverruns << "\n\n";
+
+    std::cout << "Hardware Output Telemetry:\n";
+    std::cout << "  Frames rendered:" << finalDiag.framesRendered << "\n";
+    std::cout << "  HW underruns:   " << finalDiag.outputUnderruns << "\n";
+    std::cout << "  Clock position: " << finalDiag.clockPosition << " frames (@ " 
               << finalDiag.clockFrequency << " Hz)\n\n" << std::flush;
 
     return 0;
@@ -364,6 +408,8 @@ int CommandInterface::run(int argc, char* argv[]) {
         return handleWatchCommand(subArgs);
     } else if (cmd == "tone" || cmd == "play-tone") {
         return handleToneCommand(subArgs);
+    } else if (cmd == "status" || cmd == "diag") {
+        return handleStatusCommand(subArgs);
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         printHelp();
         return 0;

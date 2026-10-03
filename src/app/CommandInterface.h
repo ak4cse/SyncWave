@@ -22,6 +22,7 @@ private:
     int handleDevicesCommand(const std::vector<std::string>& args);
     int handleWatchCommand(const std::vector<std::string>& args);
     int handleToneCommand(const std::vector<std::string>& args);
+    int handleStatusCommand(const std::vector<std::string>& args);
 
     std::unique_ptr<DeviceManager> deviceManager_;
     std::unique_ptr<AudioEngine> audioEngine_;

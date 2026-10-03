@@ -36,8 +36,12 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Pure mathematical `ToneGenerator` supporting Float32 / PCM with continuous phase tracking.
   - Hardware clock tracking via `IAudioClock`.
   - CLI command: `syncwave tone [--device <id|index>] [--frequency <Hz>] [--duration <sec>] [--volume <0..1>]`
-- [ ] **Milestone 4 — WASAPI Loopback Capture**
-- [ ] **Milestone 5 — Lock-Free Master Ring Buffer**
+- [x] **Milestone 4 — Master Audio Bus & Real-Time Ring Buffer**
+  - Lock-free Single-Producer / Single-Consumer (SPSC) circular buffer (`RingBuffer`).
+  - Central canonical audio timeline (`MasterAudioBus`) with bounded preallocated storage.
+  - Decoupled pipeline: `ToneGenerator -> MasterAudioBus -> WasapiOutput`.
+  - CLI commands: `syncwave tone`, `syncwave status`.
+- [ ] **Milestone 5 — WASAPI Loopback Capture**
 - [ ] **Milestone 6 — Multi-Endpoint Output Pipeline**
 - [ ] **Milestone 7 — Physical Latency Measurement**
 - [ ] **Milestone 8 — DelayBuffer & Static Synchronization**

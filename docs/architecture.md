@@ -106,3 +106,37 @@ To ensure safety:
    - Lock-free telemetry counters (`framesRendered`, `underruns`).
 4. **`AudioEngine`**: Coordinates output lifecycle, device lookup, and signal generation.
 
+---
+
+## 4. Milestone 4: Master Audio Bus & Real-Time Ring Buffer
+
+### Component Hierarchy
+```text
+           [ToneGenerator] (or future Loopback Capture)
+                  |
+                  | write()
+                  v
+         +------------------+
+         |  MasterAudioBus  |  (Canonical Format: 48 kHz Float32 Stereo)
+         |   [RingBuffer]   |  (Preallocated Lock-Free SPSC)
+         +------------------+
+                  |
+                  | read()
+                  v
+            [WasapiOutput] (MMCSS: "Pro Audio")
+                  |
+                  v
+         [IAudioRenderClient] -> Hardware Endpoint
+```
+
+### Key Subsystems
+1. **`RingBuffer`**:
+   - Cache-line aligned (`alignas(64)`) monotonic atomic indices (`writeIndex_`, `readIndex_`).
+   - Circular buffer memory with zero dynamic allocations in the real-time path.
+   - Guaranteed silence zero-padding on underrun and non-destructive drop on overrun.
+2. **`MasterAudioBus`**:
+   - Central audio data timeline decoupled from specific hardware endpoints.
+   - Bounded capacity (typically 1.0s / 48,000 frames) providing jitter absorption.
+   - Independent telemetry tracking (`framesWritten`, `framesRead`, `underruns`, `overruns`).
+
+

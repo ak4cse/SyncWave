@@ -34,6 +34,10 @@ add_library(syncwave_core STATIC
     src/audio/AudioFormat.h
     src/audio/ToneGenerator.h
     src/audio/ToneGenerator.cpp
+    src/audio/RingBuffer.h
+    src/audio/RingBuffer.cpp
+    src/audio/MasterAudioBus.h
+    src/audio/MasterAudioBus.cpp
     src/audio/AudioEngine.h
     src/audio/AudioEngine.cpp
 )
