@@ -7,6 +7,8 @@
 #include "../src/audio/RingBuffer.h"
 #include "../src/audio/MasterAudioBus.h"
 #include "../src/audio/AudioEngine.h"
+#include "../src/dsp/Resampler.h"
+#include "../src/windows/WasapiCapture.h"
 #include "../src/app/CommandInterface.h"
 
 #include <iostream>
@@ -613,9 +615,152 @@ void testMasterAudioBusIntegration() {
     TEST_ASSERT(destChunk == synthChunk, "Audio samples read from bus match generated tone samples");
 }
 
+void testResampler() {
+    std::cout << "[TEST] Resampler Calculations and DSP Interpolation\n";
+
+    // 1. Passthrough test (48k -> 48k)
+    syncwave::Resampler passResampler(48000, 48000, 2);
+    TEST_ASSERT(std::abs(passResampler.ratio() - 1.0) < 1e-6, "Passthrough ratio is 1.0");
+
+    std::vector<float> inPassthrough(100 * 2, 0.75f);
+    std::vector<float> outPassthrough(100 * 2, 0.0f);
+    size_t passProduced = passResampler.process(inPassthrough.data(), 100, outPassthrough.data(), 100);
+    TEST_ASSERT(passProduced == 100, "Passthrough produces exact frame count (100)");
+    TEST_ASSERT(outPassthrough == inPassthrough, "Passthrough output samples match input exactly");
+
+    // 2. Downsampling test (48000 -> 44100)
+    syncwave::Resampler downResampler(48000, 44100, 2);
+    double expectedDownRatio = 48000.0 / 44100.0;
+    TEST_ASSERT(std::abs(downResampler.ratio() - expectedDownRatio) < 1e-6, "Downsampling ratio matches 48000/44100");
+
+    // 3. Upsampling test (44100 -> 48000)
+    syncwave::Resampler upResampler(44100, 48000, 2);
+    double expectedUpRatio = 44100.0 / 48000.0;
+    TEST_ASSERT(std::abs(upResampler.ratio() - expectedUpRatio) < 1e-6, "Upsampling ratio matches 44100/48000");
+
+    // 4. Linear interpolation accuracy on a known linear slope
+    // x[t] = t * 0.01f
+    syncwave::Resampler rampResampler(48000, 44100, 1);
+    constexpr size_t RAMP_IN_FRAMES = 480;
+    std::vector<float> rampIn(RAMP_IN_FRAMES);
+    for (size_t i = 0; i < RAMP_IN_FRAMES; ++i) {
+        rampIn[i] = static_cast<float>(i) * 0.01f;
+    }
+    std::vector<float> rampOut(500, 0.0f);
+    size_t rampProduced = rampResampler.process(rampIn.data(), RAMP_IN_FRAMES, rampOut.data(), 500);
+    TEST_ASSERT(rampProduced > 430 && rampProduced <= 442, "Downsampled 480 frames produce ~441 output frames");
+
+    // Verify all points on interpolated ramp follow y = (m * ratio) * 0.01f
+    bool rampAccurate = true;
+    for (size_t i = 0; i < rampProduced; ++i) {
+        float expectedVal = static_cast<float>(i * (48000.0 / 44100.0)) * 0.01f;
+        if (std::abs(rampOut[i] - expectedVal) > 1e-4f) {
+            rampAccurate = false;
+            break;
+        }
+    }
+    TEST_ASSERT(rampAccurate, "Linear interpolation reproduces exact linear continuous ramp");
+
+    // 5. Multi-chunk boundary continuity
+    syncwave::Resampler chunkResampler(48000, 44100, 1);
+    std::vector<float> chunkOut1(250, 0.0f);
+    std::vector<float> chunkOut2(250, 0.0f);
+    size_t chunk1Produced = chunkResampler.process(rampIn.data(), 240, chunkOut1.data(), 250);
+    size_t chunk2Produced = chunkResampler.process(rampIn.data() + 240, 240, chunkOut2.data(), 250);
+    
+    std::vector<float> combinedOut;
+    combinedOut.insert(combinedOut.end(), chunkOut1.begin(), chunkOut1.begin() + chunk1Produced);
+    combinedOut.insert(combinedOut.end(), chunkOut2.begin(), chunkOut2.begin() + chunk2Produced);
+
+    TEST_ASSERT(combinedOut.size() == rampProduced, "Chunked processing produced identical total frame count");
+    bool boundarySmooth = true;
+    for (size_t i = 0; i < combinedOut.size(); ++i) {
+        if (std::abs(combinedOut[i] - rampOut[i]) > 1e-5f) {
+            boundarySmooth = false;
+            break;
+        }
+    }
+    TEST_ASSERT(boundarySmooth, "Chunk boundary interpolation perfectly continuous with zero phase jump");
+
+    // 6. Resampler::pull from MasterAudioBus
+    auto fmt48k = syncwave::AudioFormat{48000, 2, 32, 8, 32, syncwave::SampleType::Float32};
+    syncwave::MasterAudioBus bus(fmt48k, 4800);
+    syncwave::Resampler pullResampler(48000, 44100, 2);
+
+    std::vector<float> busFeed(2000 * 2, 0.5f);
+    bus.write(busFeed.data(), 2000);
+
+    std::vector<float> pulled(441 * 2, 0.0f);
+    size_t pullCount = pullResampler.pull(bus, pulled.data(), 441);
+    TEST_ASSERT(pullCount == 441, "Resampler::pull returned exact requested 441 frames");
+    TEST_ASSERT(std::abs(pulled[0] - 0.5f) < 1e-4f, "Pulled audio values match fed values");
+}
+
+void testWasapiCaptureIntegration() {
+    std::cout << "[TEST] WasapiCapture Real-Time Loopback Integration\n";
+
+    syncwave::WasapiCapture capture;
+    TEST_ASSERT(capture.state() == syncwave::CaptureState::Uninitialized, "WasapiCapture initially Uninitialized");
+
+    bool opened = capture.open("");
+    TEST_ASSERT(opened, "WasapiCapture::open() succeeded on default render endpoint");
+    TEST_ASSERT(capture.state() == syncwave::CaptureState::Opened, "WasapiCapture in Opened state");
+    TEST_ASSERT(!capture.deviceId().empty(), "Captured device ID is non-empty");
+    TEST_ASSERT(!capture.deviceName().empty(), "Captured device name is non-empty");
+    std::cout << "    Capturing on default endpoint: " << capture.deviceName() << "\n";
+
+    bool initialized = capture.initialize();
+    TEST_ASSERT(initialized, "WasapiCapture::initialize() succeeded in shared loopback mode");
+    TEST_ASSERT(capture.state() == syncwave::CaptureState::Initialized, "WasapiCapture in Initialized state");
+
+    const auto capFmt = capture.format();
+    TEST_ASSERT(capFmt.sampleRate >= 44100, "Capture sample rate is >= 44.1 kHz");
+    TEST_ASSERT(capFmt.channels >= 1, "Capture channels >= 1");
+    TEST_ASSERT(capture.bufferFrameCount() > 0, "Capture buffer frame count > 0");
+
+    std::atomic<uint64_t> receivedFrames{0};
+    bool started = capture.start([&](const float* /*data*/, uint32_t frames, const syncwave::AudioFormat& /*fmt*/) {
+        receivedFrames.fetch_add(frames, std::memory_order_relaxed);
+    });
+
+    TEST_ASSERT(started, "WasapiCapture::start() succeeded");
+    TEST_ASSERT(capture.state() == syncwave::CaptureState::Running, "WasapiCapture in Running state");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    capture.stop();
+    TEST_ASSERT(capture.state() == syncwave::CaptureState::Stopped, "WasapiCapture in Stopped state after stop()");
+
+    capture.close();
+    TEST_ASSERT(capture.state() == syncwave::CaptureState::Closed, "WasapiCapture in Closed state after close()");
+}
+
+void testAudioEngineCaptureIntegration() {
+    std::cout << "[TEST] AudioEngine System Audio Loopback Pipeline\n";
+
+    syncwave::AudioEngine engine;
+    TEST_ASSERT(!engine.isRunning(), "AudioEngine initially not running");
+
+    bool started = engine.startCapture("", "");
+    TEST_ASSERT(started, "AudioEngine::startCapture() succeeded on default endpoints");
+    TEST_ASSERT(engine.isRunning(), "AudioEngine isRunning() reports true during capture");
+
+    auto diag = engine.getDiagnostics();
+    TEST_ASSERT(diag.isCaptureMode, "Diagnostics report isCaptureMode == true");
+    TEST_ASSERT(diag.busCapacityFrames > 0, "MasterAudioBus capacity configured");
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    engine.stop();
+    TEST_ASSERT(!engine.isRunning(), "AudioEngine stopped cleanly");
+
+    auto finalDiag = engine.getDiagnostics();
+    TEST_ASSERT(!finalDiag.isRunning, "Final diagnostics report isRunning == false");
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 4)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 5)   \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -631,6 +776,9 @@ int main() {
     testRingBufferDataIntegrity();
     testRingBufferConcurrencyStress();
     testMasterAudioBusIntegration();
+    testResampler();
+    testWasapiCaptureIntegration();
+    testAudioEngineCaptureIntegration();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

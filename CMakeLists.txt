@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SyncWave VERSION 0.1.0 LANGUAGES CXX)
+project(SyncWave VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,6 +30,8 @@ add_library(syncwave_core STATIC
     src/windows/DeviceNotification.cpp
     src/windows/WasapiOutput.h
     src/windows/WasapiOutput.cpp
+    src/windows/WasapiCapture.h
+    src/windows/WasapiCapture.cpp
     src/windows/ComHelper.h
     src/audio/AudioFormat.h
     src/audio/ToneGenerator.h
@@ -40,6 +42,8 @@ add_library(syncwave_core STATIC
     src/audio/MasterAudioBus.cpp
     src/audio/AudioEngine.h
     src/audio/AudioEngine.cpp
+    src/dsp/Resampler.h
+    src/dsp/Resampler.cpp
 )
 
 target_include_directories(syncwave_core PUBLIC

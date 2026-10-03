@@ -41,7 +41,12 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Central canonical audio timeline (`MasterAudioBus`) with bounded preallocated storage.
   - Decoupled pipeline: `ToneGenerator -> MasterAudioBus -> WasapiOutput`.
   - CLI commands: `syncwave tone`, `syncwave status`.
-- [ ] **Milestone 5 — WASAPI Loopback Capture**
+- [x] **Milestone 5 — WASAPI Loopback Capture & Real-Time Resampling**
+  - Native WASAPI loopback capture client (`WasapiCapture`) on render endpoints.
+  - High-priority MMCSS ("Capture") thread with silence packet translation.
+  - Output-boundary linear interpolation sample rate converter (`Resampler`).
+  - Live system audio pipeline: `Windows Audio -> WASAPI Loopback -> MasterAudioBus -> Resampler -> WasapiOutput -> Hardware`.
+  - CLI command: `syncwave capture [--source <id|index>] [--output <id|index>] [--duration <sec>]`
 - [ ] **Milestone 6 — Multi-Endpoint Output Pipeline**
 - [ ] **Milestone 7 — Physical Latency Measurement**
 - [ ] **Milestone 8 — DelayBuffer & Static Synchronization**
@@ -86,22 +91,6 @@ cmake --build build --config Release
 .\build\syncwave.exe devices --all
 ```
 
-Example output:
-```text
-SyncWave Audio Devices
-======================
-
-[0] Speakers (Realtek(R) Audio)
-    State: Active
-    ID:    {0.0.0.00000000}.{e7d6dd87-9f7d-4ee3-9cff-762d87cf609d}
-
-[1] Headphones (realme Buds T310) [DEFAULT]
-    State: Active
-    ID:    {0.0.0.00000000}.{cafb0285-e226-4a55-91f6-be05aa5e8347}
-
-Total endpoints: 2
-```
-
 ### Watch Audio Device Events in Real Time
 ```powershell
 # Run device event monitor (hot-plug, default device change, disconnects)
@@ -109,6 +98,18 @@ Total endpoints: 2
 
 # Or run with a timeout (in seconds)
 .\build\syncwave.exe watch --timeout 10
+```
+
+### Capture Windows System Audio via WASAPI Loopback
+```powershell
+# Capture from default render endpoint and play through default output for 5 seconds
+.\build\syncwave.exe capture
+
+# Capture from Realtek Speakers [3] and route to Bluetooth Buds [2] for 10 seconds
+.\build\syncwave.exe capture --source 3 --output 2 --duration 10
+
+# Continuous streaming until Ctrl+C
+.\build\syncwave.exe capture --source 3 --output 2 --duration 0
 ```
 
 ### Play Synthetic Test Tone
@@ -121,6 +122,11 @@ Total endpoints: 2
 
 # Play continuous tone until Ctrl+C
 .\build\syncwave.exe tone --device 2 --duration 0
+```
+
+### Check Status & Telemetry
+```powershell
+.\build\syncwave.exe status
 ```
 
 ### Running Tests

@@ -37,7 +37,7 @@ SyncWave is designed with a strict three-plane architecture to ensure real-time 
 - **Responsibilities**: Master clock timeline, endpoint clock monitoring, empirical latency estimation, drift calculation and correction.
 - **Classes**: `MasterClock`, `LatencyEstimator`, `DriftEstimator`, `SyncController`.
 
-### C. Audio Data Plane *(Subsequent Milestones)*
+### C. Audio Data Plane
 - **Responsibilities**: High-priority real-time audio movement (WASAPI Loopback Capture -> RingBuffer -> DelayBuffer -> WASAPI Render Client).
 - **Rules**: Lock-free, bounded memory, strictly **no allocations (`malloc`/`new`)**, no blocking mutexes, no file/console I/O, no COM queries on the audio render thread.
 
@@ -64,13 +64,6 @@ To ensure safety:
 2. The notification sink decodes Windows parameters (converting wide string device IDs to UTF-8) and forwards normalized `DeviceEvent` records.
 3. In the CLI `syncwave watch` implementation, incoming events are enqueued into a thread-safe synchronized queue.
 4. The CLI main thread waits on a condition variable with timeout, dequeuing events and rendering formatted output to stdout.
-
-### Supported Events
-- `OnDeviceAdded`: Fires when an audio device is plugged in or paired.
-- `OnDeviceRemoved`: Fires when an audio device is unplugged or unpaired.
-- `OnDeviceStateChanged`: Fires when a device transitions between `Active`, `Disabled`, `NotPresent`, and `Unplugged`.
-- `OnDefaultDeviceChanged`: Fires when the system default render device changes (filtered for `eRender` flow and `eConsole`/`eMultimedia` roles).
-- `OnPropertyValueChanged`: Fires when device properties (such as friendly name or format) change.
 
 ---
 
@@ -112,12 +105,12 @@ To ensure safety:
 
 ### Component Hierarchy
 ```text
-           [ToneGenerator] (or future Loopback Capture)
+           [ToneGenerator] (or Loopback Capture)
                   |
                   | write()
                   v
          +------------------+
-         |  MasterAudioBus  |  (Canonical Format: 48 kHz Float32 Stereo)
+         |  MasterAudioBus  |  (Canonical Format: Float32 Stereo)
          |   [RingBuffer]   |  (Preallocated Lock-Free SPSC)
          +------------------+
                   |
@@ -136,7 +129,50 @@ To ensure safety:
    - Guaranteed silence zero-padding on underrun and non-destructive drop on overrun.
 2. **`MasterAudioBus`**:
    - Central audio data timeline decoupled from specific hardware endpoints.
-   - Bounded capacity (typically 1.0s / 48,000 frames) providing jitter absorption.
+   - Bounded capacity (1.0s / 48,000 frames) providing jitter absorption.
    - Independent telemetry tracking (`framesWritten`, `framesRead`, `underruns`, `overruns`).
 
+---
 
+## 5. Milestone 5: WASAPI Loopback Capture & Real-Time Resampling
+
+### Component Hierarchy
+```text
+           [Windows Audio Engine]
+                     |
+                     v
+             [WasapiCapture] (MMCSS: "Capture" / "Audio")
+                     |
+                     | write()
+                     v
+         +------------------------+
+         |     MasterAudioBus     |  (Float32 stereo at native capture sample rate)
+         |      [RingBuffer]      |  (1.0s buffer capacity)
+         +------------------------+
+                     |
+                     | pull()
+                     v
+                [Resampler]          (Linear interpolation with boundary continuity)
+                     |
+                     | read()
+                     v
+               [WasapiOutput]        (MMCSS: "Pro Audio")
+                     |
+                     v
+             [Physical Device]
+```
+
+### Key Subsystems
+1. **`WasapiCapture`**:
+   - Loopback capture client initialized with `AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK`.
+   - Drains packets via `IAudioCaptureClient::GetNextPacketSize` and `GetBuffer`.
+   - Translates `AUDCLNT_BUFFERFLAGS_SILENT` packets into zero-padded silence.
+   - Real-time conversion of integer PCM streams (Int16, Int32) to canonical Float32.
+2. **`Resampler`**:
+   - Converts between arbitrary sample rates (e.g., 48,000 Hz capture to 44,100 Hz output).
+   - Zero dynamic allocations during audio streaming.
+   - Pull-mode FIFO architecture guaranteeing exact requested frame counts to downstream renderers.
+   - Preserves fractional phase and boundary samples across block boundaries to prevent clicks.
+3. **`AudioEngine`**:
+   - Orchestrates concurrent capture and render pipelines.
+   - Clean shutdown with zero thread leaks and comprehensive telemetry reporting.
