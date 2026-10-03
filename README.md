@@ -47,9 +47,14 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Output-boundary linear interpolation sample rate converter (`Resampler`).
   - Live system audio pipeline: `Windows Audio -> WASAPI Loopback -> MasterAudioBus -> Resampler -> WasapiOutput -> Hardware`.
   - CLI command: `syncwave capture [--source <id|index>] [--output <id|index>] [--duration <sec>]`
-- [ ] **Milestone 6 — Multi-Endpoint Output Pipeline**
-- [ ] **Milestone 7 — Physical Latency Measurement**
-- [ ] **Milestone 8 — DelayBuffer & Static Synchronization**
+- [x] **Milestone 6 — Multiple Simultaneous WASAPI Outputs & OutputRouter**
+  - Dedicated fan-out router (`OutputRouter`) acting as sole consumer of `MasterAudioBus`.
+  - Independent per-output pipelines (`DeviceOutput`) with isolated 1.0s SPSC queues, dedicated resamplers, and MMCSS render threads.
+  - Non-destructive queue overflow protection and hot-unplug tolerance.
+  - Concurrent multi-endpoint rendering across heterogeneous devices (e.g. 48.0 kHz Realtek + 44.1 kHz Bluetooth realme Buds T310).
+  - CLI commands: `syncwave tone --outputs 2,3`, `syncwave capture --outputs 2,3`
+- [ ] **Milestone 7 — Shared Timeline & Latency Calibration**
+- [ ] **Milestone 8 — DelayBuffer & Static Delay Alignment**
 - [ ] **Milestone 9 — Automatic Calibration**
 - [ ] **Milestone 10+ — Clock Tracking & Drift Correction**
 
@@ -105,11 +110,14 @@ cmake --build build --config Release
 # Capture from default render endpoint and play through default output for 5 seconds
 .\build\syncwave.exe capture
 
-# Capture from Realtek Speakers [3] and route to Bluetooth Buds [2] for 10 seconds
-.\build\syncwave.exe capture --source 3 --output 2 --duration 10
+# Capture from Realtek Speakers [3] and route concurrently to Bluetooth Buds [2] and Realtek [3]
+.\build\syncwave.exe capture --source 3 --outputs 2,3 --duration 10
 
-# Continuous streaming until Ctrl+C
-.\build\syncwave.exe capture --source 3 --output 2 --duration 0
+# Repeated -o / --output syntax is also supported
+.\build\syncwave.exe capture --source 3 -o 2 -o 3 --duration 5
+
+# Continuous multi-device streaming until Ctrl+C
+.\build\syncwave.exe capture --source 3 --outputs 2,3 --duration 0
 ```
 
 ### Play Synthetic Test Tone
@@ -117,11 +125,14 @@ cmake --build build --config Release
 # Play 440 Hz test tone on default output for 5 seconds
 .\build\syncwave.exe tone
 
-# Play on specific device index with custom parameters
-.\build\syncwave.exe tone --device 2 --frequency 440 --duration 10 --volume 0.25
+# Play simultaneously across multiple endpoints
+.\build\syncwave.exe tone --outputs 2,3 --duration 5
 
-# Play continuous tone until Ctrl+C
-.\build\syncwave.exe tone --device 2 --duration 0
+# Play on specific device index with custom parameters
+.\build\syncwave.exe tone -o 2 --frequency 440 --duration 10 --volume 0.25
+
+# Play continuous tone across multiple endpoints until Ctrl+C
+.\build\syncwave.exe tone --outputs 2,3 --duration 0
 ```
 
 ### Check Status & Telemetry

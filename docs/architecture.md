@@ -176,3 +176,54 @@ To ensure safety:
 3. **`AudioEngine`**:
    - Orchestrates concurrent capture and render pipelines.
    - Clean shutdown with zero thread leaks and comprehensive telemetry reporting.
+
+---
+
+## 6. Milestone 6: Multiple Simultaneous WASAPI Outputs & OutputRouter
+
+### Component Hierarchy
+```text
+           [Windows Audio Engine] (or ToneGenerator)
+                     |
+                     v
+             [WasapiCapture] (MMCSS: "Capture" / "Audio")
+                     |
+                     | write()
+                     v
+         +------------------------+
+         |     MasterAudioBus     |  (Single consumer: OutputRouter)
+         |      [RingBuffer]      |  (1.0s buffer capacity)
+         +------------------------+
+                     |
+                     | dispatch()
+                     v
+              [OutputRouter]         (Lock-free fan-out to all active queues)
+             /       |        \
+            /        |         \
+           v         v          v
+     [DeviceOutput 1] [DeviceOutput 2] [DeviceOutput N]
+     +--------------+ +--------------+ +--------------+
+     |  Queue 1     | |  Queue 2     | |  Queue N     | (SPSC 1.0s)
+     |  Resampler 1 | |  Resampler 2 | |  Resampler N | (e.g. 48k->44.1k)
+     | WasapiOutput | | WasapiOutput | | WasapiOutput | (Dedicated MMCSS)
+     +--------------+ +--------------+ +--------------+
+            |                |                |
+            v                v                v
+     [Physical HW 1]  [Physical HW 2]  [Physical HW N]
+     (Realtek 48kHz)  (Buds 44.1kHz)   (USB DAC / Steam)
+```
+
+### Key Subsystems
+1. **`OutputRouter`**:
+   - Sole consumer of `MasterAudioBus`, preserving strict SPSC lock-free semantics on the master bus.
+   - Fans out identical audio frames into independent destination queues concurrently.
+   - Isolates consumers: a slow or stalling output cannot block or degrade playback on other outputs.
+   - Non-destructive queue overflow protection: excess frames on full queues are safely dropped and tracked as `queueOverruns`.
+   - Dynamic device disconnect fault tolerance (`onDeviceDisconnected`).
+2. **`DeviceOutput`**:
+   - Encapsulates target endpoint metadata, dedicated 1.0-second SPSC queue, dedicated `Resampler`, and `WasapiOutput` instance.
+   - Per-endpoint real-time thread isolation running with independent MMCSS `"Pro Audio"` characteristics.
+   - Complete per-device telemetry tracking: frames routed, frames consumed, frames resampled, frames submitted, queue overruns/underruns, and WASAPI underruns.
+3. **Multi-Output CLI & Diagnostics**:
+   - Repeated `-o <dev>` and comma-separated `--outputs <id1>,<id2>` syntax supported across `tone` and `capture` commands.
+   - Diagnostics report comprehensive per-endpoint telemetry.

@@ -3,16 +3,16 @@
 #include "AudioFormat.h"
 #include "ToneGenerator.h"
 #include "MasterAudioBus.h"
-#include "../dsp/Resampler.h"
+#include "OutputRouter.h"
 #include "../windows/DeviceManager.h"
 #include <string>
+#include <vector>
 #include <memory>
 #include <thread>
 #include <atomic>
 
 namespace syncwave {
 
-class WasapiOutput;
 class WasapiCapture;
 
 struct ToneParameters {
@@ -48,6 +48,9 @@ struct EngineDiagnostics {
     uint64_t busUnderruns = 0;
     uint64_t busOverruns = 0;
 
+    uint64_t routerFramesDistributed = 0;
+    std::vector<DeviceOutputTelemetry> outputs;
+
     bool isRunning = false;
     bool isCaptureMode = false;
 };
@@ -62,13 +65,20 @@ public:
     AudioEngine(AudioEngine&&) = delete;
     AudioEngine& operator=(AudioEngine&&) = delete;
 
-    // Start tone playback routed through MasterAudioBus into target endpoint
+    // Start tone playback routed through MasterAudioBus into target endpoint(s)
     bool startTone(const AudioDevice& device, const ToneParameters& params);
     bool startTone(const std::string& deviceId, const ToneParameters& params);
+    bool startTone(const std::vector<AudioDevice>& devices, const ToneParameters& params);
+    bool startTone(const std::vector<std::string>& deviceIds, const ToneParameters& params);
 
-    // Start system audio loopback capture routed through MasterAudioBus into output endpoint
+    // Start system audio loopback capture routed through MasterAudioBus into output endpoint(s)
     bool startCapture(const std::string& captureDeviceId = "", const std::string& outputDeviceId = "");
     bool startCapture(const AudioDevice& captureDevice, const AudioDevice& outputDevice);
+    bool startCapture(const std::string& captureDeviceId, const std::vector<std::string>& outputDeviceIds);
+    bool startCapture(const AudioDevice& captureDevice, const std::vector<AudioDevice>& outputDevices);
+
+    // Notify engine of endpoint disconnect / unplug
+    void onDeviceDisconnected(const std::string& deviceId);
 
     // Stop playback/capture and threads
     void stop();
@@ -76,17 +86,16 @@ public:
     [[nodiscard]] bool isRunning() const;
     [[nodiscard]] EngineDiagnostics getDiagnostics() const;
     [[nodiscard]] MasterAudioBus& masterBus() { return masterBus_; }
+    [[nodiscard]] OutputRouter& outputRouter() { return router_; }
     [[nodiscard]] WasapiCapture* capture() { return capture_.get(); }
-    [[nodiscard]] WasapiOutput* output() { return output_.get(); }
 
 private:
     void producerLoop();
 
-    std::unique_ptr<WasapiOutput> output_;
     std::unique_ptr<WasapiCapture> capture_;
     ToneGenerator toneGen_;
     MasterAudioBus masterBus_;
-    Resampler resampler_;
+    OutputRouter router_;
     ToneParameters currentParams_;
 
     std::thread producerThread_;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SyncWave VERSION 0.5.0 LANGUAGES CXX)
+project(SyncWave VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,6 +40,10 @@ add_library(syncwave_core STATIC
     src/audio/RingBuffer.cpp
     src/audio/MasterAudioBus.h
     src/audio/MasterAudioBus.cpp
+    src/audio/DeviceOutput.h
+    src/audio/DeviceOutput.cpp
+    src/audio/OutputRouter.h
+    src/audio/OutputRouter.cpp
     src/audio/AudioEngine.h
     src/audio/AudioEngine.cpp
     src/dsp/Resampler.h

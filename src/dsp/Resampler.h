@@ -7,6 +7,7 @@
 namespace syncwave {
 
 class MasterAudioBus;
+class RingBuffer;
 
 class Resampler {
 public:
@@ -20,8 +21,10 @@ public:
     void resetState();
 
     // Pull exactly outFrames into outBuffer by reading from MasterAudioBus and resampling
-    // If inSampleRate == outSampleRate, directly reads from bus
     size_t pull(MasterAudioBus& bus, float* outBuffer, size_t outFrames);
+
+    // Pull exactly outFrames into outBuffer by reading from a lock-free RingBuffer and resampling
+    size_t pull(RingBuffer& queue, float* outBuffer, size_t outFrames);
 
     // Direct block processing (inBuffer -> outBuffer)
     // Returns actual number of output frames written

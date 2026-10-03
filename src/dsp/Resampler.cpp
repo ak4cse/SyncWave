@@ -1,5 +1,6 @@
 #include "Resampler.h"
 #include "../audio/MasterAudioBus.h"
+#include "../audio/RingBuffer.h"
 #include <cmath>
 #include <cstring>
 #include <algorithm>
@@ -135,6 +136,33 @@ size_t Resampler::fifoPop(float* dest, size_t frames) {
     }
 
     return framesToRead;
+}
+
+size_t Resampler::pull(RingBuffer& queue, float* outBuffer, size_t outFrames) {
+    if (!outBuffer || outFrames == 0) {
+        return 0;
+    }
+
+    if (inRate_ == outRate_) {
+        return queue.read(outBuffer, outFrames);
+    }
+
+    constexpr size_t IN_CHUNK_FRAMES = 512;
+
+    // Pull from queue and resample until we have enough frames in FIFO to satisfy outFrames
+    while (fifoCount_ < outFrames && queue.availableToRead() > 0) {
+        size_t framesToRead = std::min(IN_CHUNK_FRAMES, queue.availableToRead());
+        size_t readCount = queue.read(busChunkBuffer_.data(), framesToRead);
+        if (readCount == 0) break;
+
+        size_t maxResampled = resampledChunkBuffer_.size() / channels_;
+        size_t produced = process(busChunkBuffer_.data(), readCount, resampledChunkBuffer_.data(), maxResampled);
+        if (produced > 0) {
+            fifoPush(resampledChunkBuffer_.data(), produced);
+        }
+    }
+
+    return fifoPop(outBuffer, outFrames);
 }
 
 size_t Resampler::pull(MasterAudioBus& bus, float* outBuffer, size_t outFrames) {

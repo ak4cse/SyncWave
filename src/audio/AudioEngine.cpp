@@ -1,96 +1,145 @@
 #include "AudioEngine.h"
-#include "../windows/WasapiOutput.h"
 #include "../windows/WasapiCapture.h"
 #include <chrono>
 
 namespace syncwave {
 
 AudioEngine::AudioEngine()
-    : output_(std::make_unique<WasapiOutput>()),
-      capture_(std::make_unique<WasapiCapture>()),
+    : capture_(std::make_unique<WasapiCapture>()),
       toneGen_(440.0, 0.25),
-      masterBus_(MasterAudioBus::canonicalFormat(), 48000),
-      resampler_(48000, 48000, 2) {}
+      masterBus_(MasterAudioBus::canonicalFormat(), 48000) {}
 
 AudioEngine::~AudioEngine() {
     stop();
 }
 
 void AudioEngine::producerLoop() {
-    constexpr size_t CHUNK_SIZE = 480; // ~10ms chunk
+    constexpr size_t CHUNK_SIZE = 480; // ~10ms chunk @ 48kHz
     const auto busFormat = masterBus_.format();
     std::vector<float> chunk(CHUNK_SIZE * busFormat.channels, 0.0f);
+    const auto chunkDuration = std::chrono::microseconds(1000000ULL * CHUNK_SIZE / busFormat.sampleRate);
+
+    auto nextTick = std::chrono::steady_clock::now();
 
     while (producerRunning_.load(std::memory_order_acquire)) {
         size_t freeSpace = masterBus_.freeFrames();
         if (freeSpace >= CHUNK_SIZE) {
             toneGen_.generateFrames(reinterpret_cast<uint8_t*>(chunk.data()), CHUNK_SIZE, busFormat);
             masterBus_.write(chunk.data(), CHUNK_SIZE);
-        } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            router_.dispatch(masterBus_);
         }
+
+        nextTick += chunkDuration;
+        std::this_thread::sleep_until(nextTick);
     }
 }
 
 bool AudioEngine::startTone(const AudioDevice& device, const ToneParameters& params) {
-    return startTone(device.id, params);
+    return startTone(std::vector<AudioDevice>{device}, params);
 }
 
 bool AudioEngine::startTone(const std::string& deviceId, const ToneParameters& params) {
+    return startTone(std::vector<std::string>{deviceId}, params);
+}
+
+bool AudioEngine::startTone(const std::vector<std::string>& deviceIds, const ToneParameters& params) {
+    std::vector<AudioDevice> devices;
+    devices.reserve(deviceIds.size());
+    for (const auto& id : deviceIds) {
+        AudioDevice dev;
+        dev.id = id;
+        dev.name = id.empty() ? "Default Audio Endpoint" : ("Device " + id);
+        dev.isActive = true;
+        devices.push_back(dev);
+    }
+    return startTone(devices, params);
+}
+
+bool AudioEngine::startTone(const std::vector<AudioDevice>& devices, const ToneParameters& params) {
     stop();
     isCaptureMode_ = false;
+
+    if (devices.empty()) {
+        return false;
+    }
 
     currentParams_ = params;
     toneGen_.setFrequency(params.frequencyHz);
     toneGen_.setVolume(params.volume);
     toneGen_.resetPhase();
 
-    if (!output_->open(deviceId)) {
-        return false;
-    }
-
-    if (!output_->initialize()) {
-        output_->close();
-        return false;
-    }
-
-    const auto outFmt = output_->format();
-    masterBus_.initialize(outFmt, outFmt.sampleRate);
+    // Standard canonical master format: 48,000 Hz Float32 stereo
+    const auto masterFmt = MasterAudioBus::canonicalFormat();
+    masterBus_.initialize(masterFmt, masterFmt.sampleRate);
     masterBus_.reset();
 
+    router_.clearOutputs();
+    for (const auto& dev : devices) {
+        router_.addOutput(dev);
+    }
+
+    if (!router_.initializeOutputs(masterFmt.sampleRate, masterFmt.channels)) {
+        router_.closeOutputs();
+        return false;
+    }
+
     // Pre-fill bus with ~100ms of initial audio
-    size_t prefillFrames = outFmt.sampleRate / 10;
-    std::vector<float> prefill(prefillFrames * outFmt.channels);
-    toneGen_.generateFrames(reinterpret_cast<uint8_t*>(prefill.data()), prefillFrames, outFmt);
+    size_t prefillFrames = masterFmt.sampleRate / 10;
+    std::vector<float> prefill(prefillFrames * masterFmt.channels);
+    toneGen_.generateFrames(reinterpret_cast<uint8_t*>(prefill.data()), prefillFrames, masterFmt);
     masterBus_.write(prefill.data(), prefillFrames);
+    router_.dispatch(masterBus_);
+
+    // Start all output render threads
+    if (!router_.startOutputs()) {
+        stop();
+        return false;
+    }
 
     // Launch background producer thread feeding MasterAudioBus
     producerRunning_.store(true, std::memory_order_release);
     producerThread_ = std::thread(&AudioEngine::producerLoop, this);
 
-    // Start WASAPI output reading directly from MasterAudioBus
-    bool started = output_->start([this](uint8_t* destinationBuffer, uint32_t frameCount, const AudioFormat& /*format*/) {
-        masterBus_.read(reinterpret_cast<float*>(destinationBuffer), frameCount);
-    });
-
-    if (!started) {
-        stop();
-        return false;
-    }
-
     return true;
 }
 
-bool AudioEngine::startCapture(const AudioDevice& captureDevice, const AudioDevice& outputDevice) {
-    return startCapture(captureDevice.id, outputDevice.id);
+bool AudioEngine::startCapture(const std::string& captureDeviceId, const std::string& outputDeviceId) {
+    return startCapture(captureDeviceId, std::vector<std::string>{outputDeviceId});
 }
 
-bool AudioEngine::startCapture(const std::string& captureDeviceId, const std::string& outputDeviceId) {
+bool AudioEngine::startCapture(const AudioDevice& captureDevice, const AudioDevice& outputDevice) {
+    return startCapture(captureDevice, std::vector<AudioDevice>{outputDevice});
+}
+
+bool AudioEngine::startCapture(const std::string& captureDeviceId, const std::vector<std::string>& outputDeviceIds) {
+    std::vector<AudioDevice> devices;
+    devices.reserve(outputDeviceIds.size());
+    for (const auto& id : outputDeviceIds) {
+        AudioDevice dev;
+        dev.id = id;
+        dev.name = id.empty() ? "Default Audio Endpoint" : ("Device " + id);
+        dev.isActive = true;
+        devices.push_back(dev);
+    }
+
+    AudioDevice capDev;
+    capDev.id = captureDeviceId;
+    capDev.name = captureDeviceId.empty() ? "Default Capture Endpoint" : ("Device " + captureDeviceId);
+    capDev.isActive = true;
+
+    return startCapture(capDev, devices);
+}
+
+bool AudioEngine::startCapture(const AudioDevice& captureDevice, const std::vector<AudioDevice>& outputDevices) {
     stop();
     isCaptureMode_ = true;
 
+    if (outputDevices.empty()) {
+        return false;
+    }
+
     // 1. Open and initialize WASAPI loopback capture client
-    if (!capture_->open(captureDeviceId)) {
+    if (!capture_->open(captureDevice.id)) {
         return false;
     }
     if (!capture_->initialize()) {
@@ -98,30 +147,34 @@ bool AudioEngine::startCapture(const std::string& captureDeviceId, const std::st
         return false;
     }
 
-    // 2. Open and initialize WASAPI output renderer client
-    if (!output_->open(outputDeviceId)) {
-        capture_->close();
-        return false;
-    }
-    if (!output_->initialize()) {
-        output_->close();
-        capture_->close();
-        return false;
-    }
-
     const auto capFmt = capture_->format();
-    const auto outFmt = output_->format();
 
-    // 3. Configure MasterAudioBus: canonical Float32 stereo at capture sample rate with 1.0s capacity
+    // 2. Configure MasterAudioBus: Float32 stereo at capture sample rate with 1.0s capacity
     masterBus_.initialize(capFmt, capFmt.sampleRate);
     masterBus_.reset();
 
-    // 4. Configure sample rate resampler
-    resampler_.reset(capFmt.sampleRate, outFmt.sampleRate, capFmt.channels);
+    // 3. Register and initialize outputs in OutputRouter
+    router_.clearOutputs();
+    for (const auto& dev : outputDevices) {
+        router_.addOutput(dev);
+    }
 
-    // 5. Start capture client pushing into MasterAudioBus
+    if (!router_.initializeOutputs(capFmt.sampleRate, capFmt.channels)) {
+        capture_->close();
+        router_.closeOutputs();
+        return false;
+    }
+
+    // 4. Start all outputs
+    if (!router_.startOutputs()) {
+        stop();
+        return false;
+    }
+
+    // 5. Start capture client pushing into MasterAudioBus and dispatching to OutputRouter
     bool capStarted = capture_->start([this](const float* sourceBuffer, uint32_t frameCount, const AudioFormat& /*format*/) {
         masterBus_.write(sourceBuffer, frameCount);
+        router_.dispatch(masterBus_);
     });
 
     if (!capStarted) {
@@ -129,22 +182,11 @@ bool AudioEngine::startCapture(const std::string& captureDeviceId, const std::st
         return false;
     }
 
-    // 6. Start output renderer pulling from MasterAudioBus (via resampler if sample rates differ)
-    bool outStarted = output_->start([this, capFmt, outFmt](uint8_t* destinationBuffer, uint32_t frameCount, const AudioFormat& /*format*/) {
-        float* dest = reinterpret_cast<float*>(destinationBuffer);
-        if (capFmt.sampleRate == outFmt.sampleRate) {
-            masterBus_.read(dest, frameCount);
-        } else {
-            resampler_.pull(masterBus_, dest, frameCount);
-        }
-    });
-
-    if (!outStarted) {
-        stop();
-        return false;
-    }
-
     return true;
+}
+
+void AudioEngine::onDeviceDisconnected(const std::string& deviceId) {
+    router_.onDeviceDisconnected(deviceId);
 }
 
 void AudioEngine::stop() {
@@ -162,18 +204,15 @@ void AudioEngine::stop() {
         capture_->close();
     }
 
-    if (output_) {
-        output_->stop();
-        output_->close();
-    }
+    router_.stopOutputs();
+    router_.closeOutputs();
 
     masterBus_.reset();
-    resampler_.resetState();
     isCaptureMode_ = false;
 }
 
 bool AudioEngine::isRunning() const {
-    return output_ && output_->state() == OutputState::Running;
+    return router_.anyRunning() || (capture_ && capture_->state() == CaptureState::Running);
 }
 
 EngineDiagnostics AudioEngine::getDiagnostics() const {
@@ -182,16 +221,20 @@ EngineDiagnostics AudioEngine::getDiagnostics() const {
     }
 
     EngineDiagnostics diag;
-    if (output_) {
-        diag.deviceName = output_->deviceName();
-        diag.deviceId = output_->deviceId();
-        diag.format = output_->format();
-        diag.bufferFrameCount = output_->bufferFrameCount();
-        diag.framesRendered = output_->framesRendered();
-        diag.outputUnderruns = output_->underruns();
-        auto clock = output_->getClockPosition();
-        diag.clockPosition = clock.first;
-        diag.clockFrequency = clock.second;
+    diag.outputs = router_.getOutputTelemetry();
+    diag.routerFramesDistributed = router_.totalFramesDistributed();
+
+    // Populate primary output fields for backwards compatibility
+    if (!diag.outputs.empty()) {
+        const auto& primary = diag.outputs[0];
+        diag.deviceName = primary.deviceName;
+        diag.deviceId = primary.deviceId;
+        diag.format = primary.format;
+        diag.bufferFrameCount = primary.bufferFrameCount;
+        diag.framesRendered = primary.framesSubmitted;
+        diag.outputUnderruns = primary.wasapiUnderruns;
+        diag.clockPosition = primary.clockPosition;
+        diag.clockFrequency = primary.clockFrequency;
     }
 
     if (capture_) {

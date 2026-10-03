@@ -7,6 +7,8 @@
 #include "../src/audio/RingBuffer.h"
 #include "../src/audio/MasterAudioBus.h"
 #include "../src/audio/AudioEngine.h"
+#include "../src/audio/DeviceOutput.h"
+#include "../src/audio/OutputRouter.h"
 #include "../src/dsp/Resampler.h"
 #include "../src/windows/WasapiCapture.h"
 #include "../src/app/CommandInterface.h"
@@ -758,9 +760,320 @@ void testAudioEngineCaptureIntegration() {
     TEST_ASSERT(!finalDiag.isRunning, "Final diagnostics report isRunning == false");
 }
 
+void testDeviceOutputModel() {
+    std::cout << "[TEST] DeviceOutput Queue, Resampler & Telemetry\n";
+
+    syncwave::AudioDevice dev{"mock-dev-1", "Mock Device 1", syncwave::DeviceState::Active, true, false};
+    syncwave::DeviceOutput out(dev);
+
+    TEST_ASSERT(out.deviceId() == "mock-dev-1", "DeviceOutput preserves device ID");
+    TEST_ASSERT(out.deviceName() == "Mock Device 1", "DeviceOutput preserves device Name");
+    TEST_ASSERT(out.isAvailable(), "DeviceOutput initially available");
+    TEST_ASSERT(out.queue() == nullptr, "Queue initially unallocated before initialize");
+
+    bool inited = out.initializeForTesting(48000, 2, 48000);
+    TEST_ASSERT(inited, "DeviceOutput initializeForTesting succeeds");
+    TEST_ASSERT(out.queue() != nullptr, "Queue allocated after initialization");
+    TEST_ASSERT(out.queue()->capacityFrames() == 48000, "Queue capacity matches 1.0 second master frame rate");
+
+    std::vector<float> sampleData(500 * 2, 0.75f);
+    size_t pushed = out.push(sampleData.data(), 500);
+    TEST_ASSERT(pushed == 500, "DeviceOutput::push pushes 500 stereo frames");
+
+    auto telem = out.getTelemetry();
+    TEST_ASSERT(telem.framesRouted == 500, "Telemetry records 500 frames routed");
+    TEST_ASSERT(telem.queueAvailable == 500, "Telemetry records 500 frames available in queue");
+
+    std::vector<float> readBuf(500 * 2, 0.0f);
+    size_t readFrames = out.queue()->read(readBuf.data(), 500);
+    TEST_ASSERT(readFrames == 500, "Read 500 frames from output queue");
+    TEST_ASSERT(readBuf[0] == 0.75f, "Read sample matches pushed value");
+
+    out.markUnavailable();
+    TEST_ASSERT(!out.isAvailable(), "DeviceOutput marked unavailable");
+    size_t droppedPush = out.push(sampleData.data(), 100);
+    TEST_ASSERT(droppedPush == 0, "Push returns 0 when device is unavailable");
+}
+
+void testOutputRouterLifecycle() {
+    std::cout << "[TEST] OutputRouter Lifecycle & Endpoint Management\n";
+
+    syncwave::OutputRouter router;
+    TEST_ASSERT(router.outputCount() == 0, "OutputRouter begins with 0 outputs");
+
+    syncwave::AudioDevice dev1{"dev-1", "Speakers 1", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"dev-2", "Headphones 2", syncwave::DeviceState::Active, false, false};
+    syncwave::AudioDevice dev3{"dev-3", "Bluetooth 3", syncwave::DeviceState::Active, false, false};
+
+    TEST_ASSERT(router.addOutput(dev1), "addOutput(dev1) succeeds");
+    TEST_ASSERT(router.addOutput(dev2), "addOutput(dev2) succeeds");
+    TEST_ASSERT(router.addOutput(dev3), "addOutput(dev3) succeeds");
+    TEST_ASSERT(router.outputCount() == 3, "OutputRouter count is 3");
+
+    // Cannot add duplicate
+    TEST_ASSERT(!router.addOutput(dev1), "addOutput rejected duplicate device ID");
+    TEST_ASSERT(router.outputCount() == 3, "OutputRouter count remains 3 after duplicate rejection");
+
+    // Lookup
+    TEST_ASSERT(router.getOutput(0) != nullptr, "getOutput(0) returns valid pointer");
+    TEST_ASSERT(router.getOutput(0)->deviceId() == "dev-1", "getOutput(0) matches dev-1");
+    TEST_ASSERT(router.getOutput("dev-2") != nullptr, "getOutput('dev-2') finds device");
+    TEST_ASSERT(router.getOutput("dev-2")->deviceName() == "Headphones 2", "dev-2 name matches");
+    TEST_ASSERT(router.getOutput("unknown") == nullptr, "getOutput for unknown ID returns nullptr");
+
+    // Remove
+    TEST_ASSERT(router.removeOutput("dev-2"), "removeOutput('dev-2') succeeds");
+    TEST_ASSERT(router.outputCount() == 2, "OutputRouter count decreases to 2");
+    TEST_ASSERT(router.getOutput("dev-2") == nullptr, "dev-2 no longer found after removal");
+
+    // Clear
+    router.clearOutputs();
+    TEST_ASSERT(router.outputCount() == 0, "clearOutputs() clears all configured outputs");
+}
+
+void testOutputRouterFanOut() {
+    std::cout << "[TEST] OutputRouter Identical Multi-Output Fan-Out\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"out-1", "Endpoint 1", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"out-2", "Endpoint 2", syncwave::DeviceState::Active, false, false};
+    syncwave::AudioDevice dev3{"out-3", "Endpoint 3", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+    router.addOutput(dev3);
+
+    bool inited = router.initializeOutputsForTesting(48000, 2);
+    TEST_ASSERT(inited, "initializeOutputsForTesting succeeded for 3 outputs");
+
+    // Generate unique test pattern: stereo ramp
+    const size_t TEST_FRAMES = 1024;
+    std::vector<float> testPattern(TEST_FRAMES * 2);
+    for (size_t i = 0; i < TEST_FRAMES; ++i) {
+        testPattern[i * 2 + 0] = static_cast<float>(i) * 0.001f;
+        testPattern[i * 2 + 1] = -static_cast<float>(i) * 0.001f;
+    }
+
+    router.route(testPattern.data(), TEST_FRAMES);
+
+    TEST_ASSERT(router.totalFramesDistributed() == TEST_FRAMES, "Router totalFramesDistributed matches pushed frames");
+
+    auto telems = router.getOutputTelemetry();
+    TEST_ASSERT(telems.size() == 3, "Telemetry returned for all 3 outputs");
+    for (size_t o = 0; o < telems.size(); ++o) {
+        TEST_ASSERT(telems[o].framesRouted == TEST_FRAMES, "Each output received exact routed frame count");
+        TEST_ASSERT(telems[o].queueAvailable == TEST_FRAMES, "Each output queue holds exact routed frame count");
+    }
+
+    // Verify all 3 queues contain identical data bit-for-bit
+    for (size_t o = 0; o < 3; ++o) {
+        auto* devOut = router.getOutput(o);
+        std::vector<float> readBuffer(TEST_FRAMES * 2, 0.0f);
+        size_t read = devOut->queue()->read(readBuffer.data(), TEST_FRAMES);
+        TEST_ASSERT(read == TEST_FRAMES, "Read exact frames from output queue");
+        TEST_ASSERT(readBuffer == testPattern, "Output queue contains bit-identical copy of routed audio frames");
+    }
+
+    // Test dispatch from MasterAudioBus to OutputRouter
+    syncwave::AudioFormat busFmt{48000, 2, 32, 8, 32, syncwave::SampleType::Float32};
+    syncwave::MasterAudioBus bus(busFmt, 4800);
+    bus.write(testPattern.data(), 512);
+
+    size_t dispatched = router.dispatch(bus, 512);
+    TEST_ASSERT(dispatched == 512, "router.dispatch() pulled 512 frames from MasterAudioBus");
+    for (size_t o = 0; o < 3; ++o) {
+        auto* devOut = router.getOutput(o);
+        TEST_ASSERT(devOut->queue()->availableToRead() == 512, "Each output queue received 512 dispatched frames from bus");
+    }
+}
+
+void testOutputRouterIndependentQueues() {
+    std::cout << "[TEST] OutputRouter Independent Queue Isolation\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice devFast{"dev-fast", "Fast Consumer", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice devSlow{"dev-slow", "Slow Consumer", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(devFast);
+    router.addOutput(devSlow);
+    router.initializeOutputsForTesting(48000, 2);
+
+    std::vector<float> chunk1(1000 * 2, 0.1f);
+    router.route(chunk1.data(), 1000);
+
+    // Fast consumer consumes all 1000 frames
+    std::vector<float> fastBuf(1000 * 2);
+    size_t fastRead = router.getOutput("dev-fast")->queue()->read(fastBuf.data(), 1000);
+    TEST_ASSERT(fastRead == 1000, "Fast consumer read 1000 frames");
+    TEST_ASSERT(router.getOutput("dev-fast")->queue()->availableToRead() == 0, "Fast consumer queue empty");
+
+    // Slow consumer reads nothing
+    TEST_ASSERT(router.getOutput("dev-slow")->queue()->availableToRead() == 1000, "Slow consumer queue retains all 1000 frames");
+
+    // Route another chunk
+    std::vector<float> chunk2(500 * 2, 0.2f);
+    router.route(chunk2.data(), 500);
+
+    TEST_ASSERT(router.getOutput("dev-fast")->queue()->availableToRead() == 500, "Fast consumer queue has only new 500 frames");
+    TEST_ASSERT(router.getOutput("dev-slow")->queue()->availableToRead() == 1500, "Slow consumer queue has accumulated 1500 frames");
+    TEST_ASSERT(router.getOutput("dev-fast")->getTelemetry().queueOverruns == 0, "Fast consumer 0 overruns");
+    TEST_ASSERT(router.getOutput("dev-slow")->getTelemetry().queueOverruns == 0, "Slow consumer 0 overruns");
+}
+
+void testOutputRouterQueueOverflow() {
+    std::cout << "[TEST] OutputRouter Queue Overflow Non-Destructive Handling\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice devA{"dev-a", "Active Consumer", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice devStalled{"dev-stalled", "Stalled Consumer", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(devA);
+    router.addOutput(devStalled);
+    router.initializeOutputsForTesting(48000, 2); // capacity = 48000 frames each
+
+    // Fill queues to full capacity (48000 frames)
+    std::vector<float> bulkAudio(4000 * 2, 0.3f);
+    for (int i = 0; i < 12; ++i) {
+        router.route(bulkAudio.data(), 4000);
+    }
+
+    TEST_ASSERT(router.getOutput("dev-stalled")->queue()->availableToRead() == 48000, "Stalled consumer queue completely filled");
+
+    // devA consumes 2000 frames to make room
+    std::vector<float> drain(2000 * 2);
+    router.getOutput("dev-a")->queue()->read(drain.data(), 2000);
+    TEST_ASSERT(router.getOutput("dev-a")->queue()->availableToRead() == 46000, "Dev A has 2000 frames of headroom");
+
+    // Route 1000 more frames
+    std::vector<float> extra(1000 * 2, 0.9f);
+    router.route(extra.data(), 1000);
+
+    // devA absorbed all 1000 frames
+    TEST_ASSERT(router.getOutput("dev-a")->queue()->availableToRead() == 47000, "Dev A successfully absorbed extra frames");
+    TEST_ASSERT(router.getOutput("dev-a")->getTelemetry().queueOverruns == 0, "Dev A suffered 0 queue overruns");
+
+    // devStalled dropped 1000 frames due to overflow
+    TEST_ASSERT(router.getOutput("dev-stalled")->queue()->availableToRead() == 48000, "Stalled queue remained at capacity limit");
+    TEST_ASSERT(router.getOutput("dev-stalled")->getTelemetry().queueOverruns == 1000, "Stalled queue recorded exact 1000 overrun frames");
+}
+
+void testOutputRouterMultiSampleRateResampling() {
+    std::cout << "[TEST] OutputRouter Multi-Sample-Rate Resampling Isolation\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev48k{"dev-48k", "Speakers 48kHz", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev44k{"dev-44k", "Buds 44.1kHz", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev48k);
+    router.addOutput(dev44k);
+
+    // dev48k at 48000, dev44k at 44100
+    router.initializeOutputsForTesting(48000, 2, {48000, 44100});
+
+    // 4800 frames of 48 kHz stereo audio (= 0.1s)
+    std::vector<float> audio48k(4800 * 2, 0.4f);
+    router.route(audio48k.data(), 4800);
+
+    // dev48k queue read (1:1 rate)
+    std::vector<float> out48k(4800 * 2, 0.0f);
+    size_t dev48Read = router.getOutput("dev-48k")->queue()->read(out48k.data(), 4800);
+    TEST_ASSERT(dev48Read == 4800, "48 kHz output read all 4800 frames directly");
+
+    // dev44k resampler pull (4800 frames downsampled to 44.1k = 4410 frames)
+    std::vector<float> out44k(4410 * 2, 0.0f);
+    auto* dev44Output = router.getOutput("dev-44k");
+    size_t dev44Produced = dev44Output->resampler()->pull(*dev44Output->queue(), out44k.data(), 4410);
+    TEST_ASSERT(dev44Produced == 4410, "Resampler pull produced exact 4410 frames for 44.1 kHz output");
+    TEST_ASSERT(std::abs(out44k[0] - 0.4f) < 1e-4f, "Resampled 44.1 kHz audio preserved sample magnitude");
+}
+
+void testOutputRouterDisconnectHandling() {
+    std::cout << "[TEST] OutputRouter Hot-Unplug / Disconnect Handling\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"usb-dac", "USB DAC", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"realtek", "Realtek Speakers", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+    router.initializeOutputsForTesting(48000, 2);
+
+    TEST_ASSERT(router.getOutput("usb-dac")->isAvailable(), "USB DAC initially available");
+    TEST_ASSERT(router.getOutput("realtek")->isAvailable(), "Realtek initially available");
+
+    // Disconnect USB DAC
+    router.onDeviceDisconnected("usb-dac");
+    TEST_ASSERT(!router.getOutput("usb-dac")->isAvailable(), "USB DAC marked unavailable after disconnect");
+    TEST_ASSERT(router.getOutput("realtek")->isAvailable(), "Realtek remains active and available");
+
+    // Route frames
+    std::vector<float> testChunk(300 * 2, 0.5f);
+    router.route(testChunk.data(), 300);
+
+    TEST_ASSERT(router.getOutput("usb-dac")->getTelemetry().framesRouted == 0, "Disconnected device received 0 frames");
+    TEST_ASSERT(router.getOutput("realtek")->getTelemetry().framesRouted == 300, "Active device received all 300 routed frames");
+}
+
+void testOutputRouterCleanShutdown() {
+    std::cout << "[TEST] OutputRouter Clean Shutdown With Buffered Frames\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"dev-1", "Device 1", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"dev-2", "Device 2", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+    router.initializeOutputsForTesting(48000, 2);
+
+    std::vector<float> chunk(2500 * 2, 0.2f);
+    router.route(chunk.data(), 2500);
+
+    TEST_ASSERT(router.getOutput("dev-1")->queue()->availableToRead() == 2500, "Queue has 2500 buffered frames");
+
+    // Close outputs while data is in queues
+    router.closeOutputs();
+    TEST_ASSERT(router.getOutput("dev-1")->queue()->availableToRead() == 0, "dev-1 queue reset on close");
+    TEST_ASSERT(router.getOutput("dev-2")->queue()->availableToRead() == 0, "dev-2 queue reset on close");
+}
+
+void testAudioEngineMultiOutputIntegration() {
+    std::cout << "[TEST] AudioEngine Multi-Output Integration\n";
+
+    syncwave::DeviceManager mgr;
+    auto activeDevices = mgr.enumerateDevices(true);
+    if (activeDevices.size() >= 2) {
+        std::cout << "    Testing with 2 physical endpoints: " 
+                  << activeDevices[0].name << " and " << activeDevices[1].name << "\n";
+        
+        syncwave::AudioEngine engine;
+        std::vector<syncwave::AudioDevice> targets = {activeDevices[0], activeDevices[1]};
+        
+        syncwave::ToneParameters params;
+        params.frequencyHz = 440.0;
+        params.volume = 0.2;
+        params.durationSec = 0.5;
+
+        bool started = engine.startTone(targets, params);
+        TEST_ASSERT(started, "AudioEngine::startTone() with 2 endpoints succeeded");
+        TEST_ASSERT(engine.isRunning(), "AudioEngine reports isRunning == true with 2 endpoints");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+        auto diag = engine.getDiagnostics();
+        TEST_ASSERT(diag.outputs.size() == 2, "Diagnostics report 2 active output endpoints");
+        TEST_ASSERT(diag.outputs[0].framesRouted > 0 || diag.outputs[1].framesRouted > 0, "Frames routed to outputs");
+
+        engine.stop();
+        TEST_ASSERT(!engine.isRunning(), "AudioEngine stopped cleanly from multi-output tone");
+    } else {
+        std::cout << "    Skipping physical multi-output integration test (requires >= 2 active audio endpoints, found " 
+                  << activeDevices.size() << ")\n";
+    }
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 5)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 6)   \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -779,6 +1092,15 @@ int main() {
     testResampler();
     testWasapiCaptureIntegration();
     testAudioEngineCaptureIntegration();
+    testDeviceOutputModel();
+    testOutputRouterLifecycle();
+    testOutputRouterFanOut();
+    testOutputRouterIndependentQueues();
+    testOutputRouterQueueOverflow();
+    testOutputRouterMultiSampleRateResampling();
+    testOutputRouterDisconnectHandling();
+    testOutputRouterCleanShutdown();
+    testAudioEngineMultiOutputIntegration();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";
