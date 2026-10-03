@@ -30,7 +30,12 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Atomic COM reference counting and thread-safe MTA callback handling.
   - Decoupled `DeviceEvent` queue avoiding COM dependencies in CLI.
   - CLI command: `syncwave watch [--timeout <sec>]`
-- [ ] **Milestone 3 — WASAPI Single Renderer & Test Tone**
+- [x] **Milestone 3 — WASAPI Single Renderer & Test Tone**
+  - Native WASAPI shared event-driven audio renderer (`WasapiOutput`).
+  - High-priority MMCSS ("Pro Audio") render thread with zero busy-waiting.
+  - Pure mathematical `ToneGenerator` supporting Float32 / PCM with continuous phase tracking.
+  - Hardware clock tracking via `IAudioClock`.
+  - CLI command: `syncwave tone [--device <id|index>] [--frequency <Hz>] [--duration <sec>] [--volume <0..1>]`
 - [ ] **Milestone 4 — WASAPI Loopback Capture**
 - [ ] **Milestone 5 — Lock-Free Master Ring Buffer**
 - [ ] **Milestone 6 — Multi-Endpoint Output Pipeline**
@@ -100,6 +105,18 @@ Total endpoints: 2
 
 # Or run with a timeout (in seconds)
 .\build\syncwave.exe watch --timeout 10
+```
+
+### Play Synthetic Test Tone
+```powershell
+# Play 440 Hz test tone on default output for 5 seconds
+.\build\syncwave.exe tone
+
+# Play on specific device index with custom parameters
+.\build\syncwave.exe tone --device 2 --frequency 440 --duration 10 --volume 0.25
+
+# Play continuous tone until Ctrl+C
+.\build\syncwave.exe tone --device 2 --duration 0
 ```
 
 ### Running Tests

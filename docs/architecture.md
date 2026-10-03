@@ -71,3 +71,38 @@ To ensure safety:
 - `OnDeviceStateChanged`: Fires when a device transitions between `Active`, `Disabled`, `NotPresent`, and `Unplugged`.
 - `OnDefaultDeviceChanged`: Fires when the system default render device changes (filtered for `eRender` flow and `eConsole`/`eMultimedia` roles).
 - `OnPropertyValueChanged`: Fires when device properties (such as friendly name or format) change.
+
+---
+
+## 3. Milestone 3: Single WASAPI Output Renderer
+
+### Component Hierarchy
+```text
+[CommandInterface]
+        |
+        v
+  [AudioEngine]
+   /         \
+  v           v
+[WasapiOutput] [ToneGenerator]
+      |
+      v
+ [Render Thread] (MMCSS: "Pro Audio")
+      |
+      v
+[IAudioRenderClient] -> Windows Audio Engine -> Hardware Endpoint
+```
+
+### Key Subsystems
+1. **`AudioFormat`**: Clean internal data structure modeling sample rate, channel count, bit depth, block alignment, and sample type (`Float32`, `Int16`, `Int24In32`, `Int32`), completely free of Windows header dependencies.
+2. **`ToneGenerator`**: Pure DSP sine generator with continuous phase tracking across chunks:
+   $$\phi_{k+1} = (\phi_k + 2\pi f / f_s) \pmod{2\pi}$$
+   Computes interleaved samples directly into the destination buffer without heap allocations.
+3. **`WasapiOutput`**:
+   - Opens target endpoint via `IMMDeviceEnumerator`.
+   - Initializes `IAudioClient` with `AUDCLNT_SHAREMODE_SHARED | AUDCLNT_STREAMFLAGS_EVENTCALLBACK`.
+   - Dedicated high-priority render thread registered with MMCSS (`AvSetMmThreadCharacteristicsW`).
+   - Uses `IAudioClock` for playhead tracking.
+   - Lock-free telemetry counters (`framesRendered`, `underruns`).
+4. **`AudioEngine`**: Coordinates output lifecycle, device lookup, and signal generation.
+

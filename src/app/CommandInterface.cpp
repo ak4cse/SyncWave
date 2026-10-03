@@ -1,5 +1,6 @@
 #include "CommandInterface.h"
 #include "../windows/DeviceManager.h"
+#include "../audio/AudioEngine.h"
 
 #include <windows.h>
 #include <iostream>
@@ -12,10 +13,11 @@
 #include <queue>
 #include <condition_variable>
 #include <chrono>
+#include <thread>
 
 namespace syncwave {
 
-constexpr const char* SYNCWAVE_VERSION = "0.2.0-alpha";
+constexpr const char* SYNCWAVE_VERSION = "0.3.0-alpha";
 
 static std::atomic<bool> g_stopRequested{false};
 
@@ -28,7 +30,8 @@ static BOOL WINAPI consoleCtrlHandler(DWORD ctrlType) {
 }
 
 CommandInterface::CommandInterface()
-    : deviceManager_(std::make_unique<DeviceManager>()) {}
+    : deviceManager_(std::make_unique<DeviceManager>()),
+      audioEngine_(std::make_unique<AudioEngine>()) {}
 
 CommandInterface::~CommandInterface() = default;
 
@@ -39,12 +42,16 @@ void CommandInterface::printVersion() const {
 void CommandInterface::printHelp() const {
     printVersion();
     std::cout << "\nUsage:\n"
-              << "  syncwave devices [--all]   Enumerate audio output devices\n"
-              << "  syncwave watch             Monitor audio endpoint changes in real time\n"
-              << "  syncwave help              Show this help message\n"
-              << "  syncwave --version         Display version\n\n"
-              << "Options for 'devices':\n"
-              << "  --all                      Include disabled, unplugged, and inactive endpoints\n\n";
+              << "  syncwave devices [--all]                   Enumerate audio output devices\n"
+              << "  syncwave watch [--timeout <sec>]           Monitor audio endpoint changes in real time\n"
+              << "  syncwave tone [options]                    Play synthetic PCM sine wave on an audio device\n"
+              << "  syncwave help                              Show this help message\n"
+              << "  syncwave --version                         Display version\n\n"
+              << "Options for 'tone':\n"
+              << "  --device, -d <index|id>                    Target device index or opaque ID (default: system default)\n"
+              << "  --frequency, -f <Hz>                       Tone frequency in Hz (default: 440 Hz)\n"
+              << "  --duration, -t <sec>                       Playback duration in seconds (0 = continuous, default: 5s)\n"
+              << "  --volume, -v <0.0..1.0>                    Volume amplitude level (default: 0.25)\n\n";
 }
 
 int CommandInterface::handleDevicesCommand(const std::vector<std::string>& args) {
@@ -86,7 +93,7 @@ int CommandInterface::handleDevicesCommand(const std::vector<std::string>& args)
 }
 
 int CommandInterface::handleWatchCommand(const std::vector<std::string>& args) {
-    int timeoutSec = -1; // -1 means run until Ctrl+C
+    int timeoutSec = -1;
     for (size_t i = 0; i < args.size(); ++i) {
         if ((args[i] == "--timeout" || args[i] == "-t") && i + 1 < args.size()) {
             try {
@@ -145,7 +152,6 @@ int CommandInterface::handleWatchCommand(const std::vector<std::string>& args) {
                 DeviceEvent ev = eventQueue.front();
                 eventQueue.pop();
 
-                // Unlock while printing to avoid holding lock during stdout
                 lock.unlock();
 
                 switch (ev.type) {
@@ -199,6 +205,145 @@ int CommandInterface::handleWatchCommand(const std::vector<std::string>& args) {
     return 0;
 }
 
+int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
+    std::string deviceSelector;
+    double frequency = 440.0;
+    double duration = 5.0; // default 5 seconds
+    double volume = 0.25;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        if ((args[i] == "--device" || args[i] == "-d") && i + 1 < args.size()) {
+            deviceSelector = args[++i];
+        } else if ((args[i] == "--frequency" || args[i] == "-f") && i + 1 < args.size()) {
+            try { frequency = std::stod(args[++i]); } catch (...) {}
+        } else if ((args[i] == "--duration" || args[i] == "-t") && i + 1 < args.size()) {
+            try { duration = std::stod(args[++i]); } catch (...) {}
+        } else if ((args[i] == "--volume" || args[i] == "-v") && i + 1 < args.size()) {
+            try { volume = std::stod(args[++i]); } catch (...) {}
+        }
+    }
+
+    // Resolve target audio device
+    std::optional<AudioDevice> targetDev;
+    if (deviceSelector.empty()) {
+        targetDev = deviceManager_->getDefaultDevice();
+        if (!targetDev) {
+            std::cerr << "Error: No default audio render device found on host.\n";
+            return 1;
+        }
+    } else {
+        // Check if selector is numeric index
+        bool isIndex = !deviceSelector.empty() && 
+                       std::all_of(deviceSelector.begin(), deviceSelector.end(), ::isdigit);
+        if (isIndex) {
+            size_t idx = std::stoul(deviceSelector);
+            targetDev = deviceManager_->getDeviceByIndex(idx, true);
+            if (!targetDev) {
+                targetDev = deviceManager_->getDeviceByIndex(idx, false);
+            }
+        } else {
+            targetDev = deviceManager_->getDeviceById(deviceSelector);
+        }
+
+        if (!targetDev) {
+            std::cerr << "Error: Audio device '" << deviceSelector << "' not found.\n";
+            return 1;
+        }
+    }
+
+    if (!targetDev->isActive) {
+        std::cerr << "Warning: Target audio device '" << targetDev->name 
+                  << "' is not in Active state (" << targetDev->stateString() << ").\n";
+    }
+
+    ToneParameters params;
+    params.frequencyHz = frequency;
+    params.volume = volume;
+    params.durationSec = duration;
+
+    std::cout << "\nSyncWave Tone Generator\n";
+    std::cout << "=======================\n\n";
+    std::cout << "Device:\n";
+    std::cout << "  Name:  " << targetDev->name << "\n";
+    std::cout << "  ID:    " << targetDev->id << "\n\n";
+
+    std::atomic<bool> deviceDisconnected{false};
+
+    // Monitor endpoint notifications to detect disconnection during playback
+    deviceManager_->startMonitoring([&](const DeviceEvent& ev) {
+        if (ev.deviceId == targetDev->id) {
+            if (ev.type == DeviceEventType::Removed || 
+               (ev.type == DeviceEventType::StateChanged && ev.newState != DeviceState::Active)) {
+                deviceDisconnected.store(true);
+            }
+        }
+    });
+
+    bool started = audioEngine_->startTone(*targetDev, params);
+    if (!started) {
+        std::cerr << "Error: Failed to start WASAPI playback on device '" << targetDev->name << "'.\n";
+        deviceManager_->stopMonitoring();
+        return 1;
+    }
+
+    auto diag = audioEngine_->getDiagnostics();
+
+    std::cout << "Format:\n";
+    std::cout << "  Sample rate: " << diag.format.sampleRate << " Hz\n";
+    std::cout << "  Channels:    " << diag.format.channels << "\n";
+    std::cout << "  Format:      " << sampleTypeToString(diag.format.sampleType) 
+              << " (" << diag.format.bitsPerSample << "-bit)\n";
+    std::cout << "  Buffer:      " << diag.bufferFrameCount << " frames\n\n";
+
+    std::cout << "Tone:\n";
+    std::cout << "  Frequency:   " << frequency << " Hz\n";
+    std::cout << "  Volume:      " << volume << "\n";
+    if (duration > 0) {
+        std::cout << "  Duration:    " << duration << " second(s)\n";
+    } else {
+        std::cout << "  Duration:    Continuous\n";
+    }
+
+    std::cout << "\nPlayback started.\n";
+    std::cout << "Press Ctrl+C to stop.\n\n" << std::flush;
+
+    g_stopRequested.store(false);
+    SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+
+    auto startTime = std::chrono::steady_clock::now();
+
+    while (!g_stopRequested.load()) {
+        if (deviceDisconnected.load()) {
+            std::cout << "\nAudio device became unavailable.\nPlayback stopped.\n" << std::flush;
+            break;
+        }
+
+        if (duration > 0.0) {
+            auto elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - startTime).count();
+            if (elapsed >= duration) {
+                break;
+            }
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    audioEngine_->stop();
+    deviceManager_->stopMonitoring();
+    SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
+
+    auto finalDiag = audioEngine_->getDiagnostics();
+
+    std::cout << "\nPlayback complete.\n\n";
+    std::cout << "Frames rendered: " << finalDiag.framesRendered << "\n";
+    std::cout << "Underruns:       " << finalDiag.underruns << "\n";
+    std::cout << "Clock position:  " << finalDiag.clockPosition << " frames (@ " 
+              << finalDiag.clockFrequency << " Hz)\n\n" << std::flush;
+
+    return 0;
+}
+
 int CommandInterface::run(int argc, char* argv[]) {
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
@@ -217,6 +362,8 @@ int CommandInterface::run(int argc, char* argv[]) {
         return handleDevicesCommand(subArgs);
     } else if (cmd == "watch" || cmd == "monitor-devices") {
         return handleWatchCommand(subArgs);
+    } else if (cmd == "tone" || cmd == "play-tone") {
+        return handleToneCommand(subArgs);
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {
         printHelp();
         return 0;

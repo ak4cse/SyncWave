@@ -28,7 +28,14 @@ add_library(syncwave_core STATIC
     src/windows/DeviceManager.cpp
     src/windows/DeviceNotification.h
     src/windows/DeviceNotification.cpp
+    src/windows/WasapiOutput.h
+    src/windows/WasapiOutput.cpp
     src/windows/ComHelper.h
+    src/audio/AudioFormat.h
+    src/audio/ToneGenerator.h
+    src/audio/ToneGenerator.cpp
+    src/audio/AudioEngine.h
+    src/audio/AudioEngine.cpp
 )
 
 target_include_directories(syncwave_core PUBLIC
