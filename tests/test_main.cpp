@@ -14,6 +14,7 @@
 #include "../src/sync/DeviceClock.h"
 #include "../src/sync/DriftEstimator.h"
 #include "../src/app/CommandInterface.h"
+#include "../src/sync/SyncPulseGenerator.h"
 
 #include <iostream>
 #include <cassert>
@@ -1364,9 +1365,357 @@ void testOutputRouterClockTelemetry() {
     router.closeOutputs();
 }
 
+void testDeviceClockUnitsAndConversions() {
+    std::cout << "[TEST] DeviceClock Units, Conversions, and Edge Cases\n";
+
+    // QPC conversions
+    TEST_ASSERT(std::abs(syncwave::DeviceClockSample::qpcToSeconds(10000000ULL, 10000000ULL) - 1.0) < 1e-9, 
+                "qpcToSeconds(10M, 10M) == 1.0s");
+    TEST_ASSERT(std::abs(syncwave::DeviceClockSample::qpcToSeconds(5000000ULL, 10000000ULL) - 0.5) < 1e-9, 
+                "qpcToSeconds(5M, 10M) == 0.5s");
+    TEST_ASSERT(syncwave::DeviceClockSample::qpcToSeconds(10000000ULL, 0) == 0.0, 
+                "qpcToSeconds with 0 QPF returns 0.0 (safe guard)");
+
+    // WASAPI clock ticks to seconds
+    TEST_ASSERT(std::abs(syncwave::DeviceClockSample::ticksToSeconds(384000ULL, 384000ULL) - 1.0) < 1e-9, 
+                "ticksToSeconds(384k, 384k) == 1.0s");
+    TEST_ASSERT(std::abs(syncwave::DeviceClockSample::ticksToSeconds(192000ULL, 384000ULL) - 0.5) < 1e-9, 
+                "ticksToSeconds(192k, 384k) == 0.5s");
+    TEST_ASSERT(syncwave::DeviceClockSample::ticksToSeconds(100ULL, 0) == 0.0, 
+                "ticksToSeconds with 0 frequency returns 0.0");
+
+    // WASAPI clock ticks to audio frames (e.g. 384 kHz clock with 48 kHz frames = 8 ticks/frame)
+    TEST_ASSERT(syncwave::DeviceClockSample::ticksToFrames(384000ULL, 384000ULL, 48000) == 48000ULL, 
+                "ticksToFrames(384k, 384k, 48k) == 48,000 frames");
+    TEST_ASSERT(syncwave::DeviceClockSample::ticksToFrames(768000ULL, 384000ULL, 48000) == 96000ULL, 
+                "ticksToFrames(768k, 384k, 48k) == 96,000 frames");
+    TEST_ASSERT(syncwave::DeviceClockSample::ticksToFrames(8ULL, 384000ULL, 48000) == 1ULL, 
+                "8 ticks at 384 kHz == exactly 1 frame at 48 kHz");
+    TEST_ASSERT(syncwave::DeviceClockSample::ticksToFrames(100ULL, 0, 48000) == 0ULL, 
+                "ticksToFrames with 0 frequency returns 0");
+    TEST_ASSERT(syncwave::DeviceClockSample::ticksToFrames(100ULL, 384000ULL, 0) == 0ULL, 
+                "ticksToFrames with 0 sample rate returns 0");
+
+    // System QPF query
+    uint64_t qpf = syncwave::DeviceClock::getSystemQpcFrequency();
+    TEST_ASSERT(qpf > 0, "System QPF is greater than zero");
+    TEST_ASSERT(qpf >= 1000000ULL, "System QPF is at least 1 MHz (high resolution)");
+}
+
+void testDeviceClockMultiWindowEstimation() {
+    std::cout << "[TEST] DeviceClock Multi-Window Rate Estimation\n";
+
+    syncwave::DeviceClock clock("dev-multi-win", 48000, 1024);
+    auto t0 = std::chrono::steady_clock::now();
+
+    // Generate 60 seconds of data at 10 Hz (600 samples)
+    // Device clock runs at 48000 * 1.000025 = 48001.2 Hz (+25 ppm)
+    // Clock frequency is 384000 Hz (8 ticks per frame)
+    const uint64_t clockFreq = 384000;
+    const double framesPerSec = 48001.2;
+    const double ticksPerSec = framesPerSec * (static_cast<double>(clockFreq) / 48000.0);
+
+    for (int i = 0; i <= 600; ++i) {
+        auto t = t0 + std::chrono::milliseconds(i * 100);
+        syncwave::DeviceClockSample s;
+        s.timestamp = t;
+        s.clockPosition = static_cast<uint64_t>(std::round(i * 0.1 * ticksPerSec));
+        s.clockFrequency = clockFreq;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clock.recordSample(s);
+    }
+
+    TEST_ASSERT(clock.sampleCount() == 601, "Recorded 601 samples (60s @ 10 Hz)");
+
+    // Window = 5 seconds
+    auto est5 = clock.estimateRateOverWindow(5.0);
+    TEST_ASSERT(est5.isValid, "5s window rate estimate is valid");
+    TEST_ASSERT(est5.sampleCount > 40 && est5.sampleCount <= 60, "5s window uses ~50 samples");
+    TEST_ASSERT(std::abs(est5.estimatedRate - framesPerSec) < 0.2, "5s estimated rate matches target (+25 ppm)");
+    TEST_ASSERT(est5.rSquared > 0.999, "5s R^2 > 0.999");
+
+    // Window = 30 seconds
+    auto est30 = clock.estimateRateOverWindow(30.0);
+    TEST_ASSERT(est30.isValid, "30s window rate estimate is valid");
+    TEST_ASSERT(est30.sampleCount > 280 && est30.sampleCount <= 310, "30s window uses ~300 samples");
+    TEST_ASSERT(std::abs(est30.estimatedRate - framesPerSec) < 0.1, "30s estimated rate matches target");
+
+    // Window = 60 seconds (full window)
+    auto est60 = clock.estimateRateOverWindow(60.0);
+    TEST_ASSERT(est60.isValid, "60s window rate estimate is valid");
+    TEST_ASSERT(est60.sampleCount >= 600, "60s window uses all ~601 samples");
+    TEST_ASSERT(std::abs(est60.estimatedRate - framesPerSec) < 0.05, "60s estimated rate matches target");
+
+    // Window exceeding available range (fallback to all samples)
+    auto est120 = clock.estimateRateOverWindow(120.0);
+    TEST_ASSERT(est120.isValid, "Window exceeding duration succeeds with fallback");
+    TEST_ASSERT(est120.sampleCount == 601, "Exceeding window used all 601 samples");
+
+    // Window = 0.0 (all samples)
+    auto estAll = clock.estimateRateOverWindow(0.0);
+    TEST_ASSERT(estAll.isValid, "Window = 0.0 estimates over all samples");
+    TEST_ASSERT(estAll.sampleCount == 601, "Window = 0.0 used all 601 samples");
+
+    // Elapsed times
+    TEST_ASSERT(std::abs(clock.totalElapsedQpcTimeSec() - 60.0) < 0.1, "Total elapsed QPC time ~60.0s");
+    TEST_ASSERT(std::abs(clock.totalElapsedDeviceTimeSec() - 60.0) < 0.1, "Total elapsed Device time ~60.0s");
+}
+
+void testDriftAndOffsetSeparation() {
+    std::cout << "[TEST] Mathematical Separation of Drift from Offset\n";
+
+    // 1. Instantaneous offset calculation
+    double offset1 = syncwave::DriftEstimator::calculateOffset(10.050, 10.000);
+    TEST_ASSERT(std::abs(offset1 - 0.050) < 1e-9, "calculateOffset(10.050, 10.000) == +0.050s (+50.0 ms)");
+
+    double offset2 = syncwave::DriftEstimator::calculateOffset(10.000, 10.050);
+    TEST_ASSERT(std::abs(offset2 - (-0.050)) < 1e-9, "calculateOffset(10.000, 10.050) == -0.050s (-50.0 ms)");
+
+    // 2. Accumulated drift calculation: Delta Offset = Offset(t1) - Offset(t0)
+    // If device A started 100 ms ahead and stayed 100 ms ahead:
+    double driftConstant = syncwave::DriftEstimator::calculateAccumulatedDrift(0.100, 0.100);
+    TEST_ASSERT(std::abs(driftConstant - 0.0) < 1e-9, 
+                "Constant offset (100ms -> 100ms) produces EXACTLY 0.0 ms accumulated drift");
+
+    // If device A started 100 ms ahead and expanded to 105 ms ahead:
+    double driftExpanding = syncwave::DriftEstimator::calculateAccumulatedDrift(0.100, 0.105);
+    TEST_ASSERT(std::abs(driftExpanding - 0.005) < 1e-9, 
+                "Offset expanding from 100ms to 105ms produces +5.0 ms (+0.005s) accumulated drift");
+
+    // If device A started 100 ms ahead and contracted to 95 ms ahead:
+    double driftContracting = syncwave::DriftEstimator::calculateAccumulatedDrift(0.100, 0.095);
+    TEST_ASSERT(std::abs(driftContracting - (-0.005)) < 1e-9, 
+                "Offset contracting from 100ms to 95ms produces -5.0 ms (-0.005s) accumulated drift");
+
+    // 3. Drift rate calculation from accumulated drift (5.0 ms drift over 10.0 s = 0.005s / 10s * 1e6 = 500 ppm)
+    double ratePpm = syncwave::DriftEstimator::calculateDriftRateFromDelta(0.005, 10.0);
+    TEST_ASSERT(std::abs(ratePpm - 500.0) < 1e-9, 
+                "5.0 ms (0.005s) drift over 10.0 s == +500.0 ppm");
+
+    double rateZero = syncwave::DriftEstimator::calculateDriftRateFromDelta(0.0, 10.0);
+    TEST_ASSERT(std::abs(rateZero - 0.0) < 1e-9, 
+                "0.0 ms drift over 10.0 s == 0.0 ppm");
+
+    double rateInvalidDur = syncwave::DriftEstimator::calculateDriftRateFromDelta(0.005, 0.0);
+    TEST_ASSERT(rateInvalidDur == 0.0, 
+                "calculateDriftRateFromDelta with 0 duration returns 0.0 ppm safely");
+}
+
+void testDriftEstimatorWindowedAndConfidence() {
+    std::cout << "[TEST] DriftEstimator Windowed Estimation & Confidence Metric\n";
+
+    syncwave::DeviceClock clockA("dev-A", 48000, 200);
+    syncwave::DeviceClock clockB("dev-B", 48000, 200);
+    auto t0 = std::chrono::steady_clock::now();
+
+    // Clock A: 48000 Hz exact
+    // Clock B: 48000.72 Hz (+15 ppm)
+    // Also, clock B starts with an intentional 80 ms offset
+    for (int i = 0; i <= 50; ++i) {
+        auto t = t0 + std::chrono::milliseconds(i * 100);
+
+        syncwave::DeviceClockSample sa;
+        sa.timestamp = t;
+        sa.clockPosition = i * 4800ULL;
+        sa.clockFrequency = 48000;
+        sa.sampleRate = 48000;
+        sa.isValid = true;
+        clockA.recordSample(sa);
+
+        syncwave::DeviceClockSample sb;
+        sb.timestamp = t;
+        // B has initial 80 ms offset (= 3840 frames) plus +15 ppm
+        double bFrames = 3840.0 + (i * 0.1 * 48000.72);
+        sb.clockPosition = static_cast<uint64_t>(std::round(bFrames));
+        sb.clockFrequency = 48000;
+        sb.sampleRate = 48000;
+        sb.isValid = true;
+        clockB.recordSample(sb);
+    }
+
+    // Estimate over full 5s
+    auto estFull = syncwave::DriftEstimator::estimate(clockA, clockB);
+    TEST_ASSERT(estFull.isValid, "Full drift estimate is valid");
+    TEST_ASSERT(estFull.confidence > 0.99, "Drift confidence metric (rA^2 * rB^2) > 0.99");
+    TEST_ASSERT(std::abs(estFull.driftRatePpm - (-15.0)) < 1.0, 
+                "Drift ppm reflects A relative to B (~ -15 ppm)");
+    TEST_ASSERT(std::abs((estFull.initialOffsetSec * 1000.0) - (-80.0)) < 1.0, 
+                "Initial offset captures ~ -80 ms");
+
+    // Estimate over 2.0s window
+    auto estWin = syncwave::DriftEstimator::estimateOverWindow(clockA, clockB, 2.0);
+    TEST_ASSERT(estWin.isValid, "Windowed drift estimate is valid");
+    TEST_ASSERT(estWin.windowRequestedSec == 2.0, "Window duration recorded as 2.0s");
+    TEST_ASSERT(estWin.confidence > 0.99, "Windowed confidence metric > 0.99");
+    TEST_ASSERT(estWin.sampleCountA > 15 && estWin.sampleCountA <= 25, 
+                "Windowed estimate used ~20 samples");
+}
+
+void testDeviceOutputPlayheadEstimation() {
+    std::cout << "[TEST] DeviceOutput Playhead Estimation & Timeline Tracking\n";
+
+    syncwave::AudioDevice dev{"dev-test", "Playhead Test Device", syncwave::DeviceState::Active, true, false};
+    syncwave::DeviceOutput output(dev);
+
+    // Initial state before playback
+    TEST_ASSERT(output.estimatedAppPlayheadFrames() == 0, "Initial app playhead frames == 0");
+    TEST_ASSERT(output.estimatedAppPlayheadSeconds() == 0.0, "Initial app playhead seconds == 0.0");
+    TEST_ASSERT(output.wasapiClockPlayheadSeconds() == 0.0, "Initial WASAPI clock playhead seconds == 0.0");
+    TEST_ASSERT(output.playheadDiscrepancyMs() == 0.0, "Initial playhead discrepancy == 0.0 ms");
+
+    // Simulate clock snapshot recorded via output.clock()
+    // Native format: 48000 Hz, Clock freq: 384000 Hz (8 ticks per frame)
+    syncwave::WasapiClockSnapshot snap;
+    snap.isValid = true;
+    snap.position = 768000ULL; // 768000 / 384000 = 2.0 seconds of audio played by hardware
+    snap.frequency = 384000ULL;
+    snap.sampleRate = 48000;
+    snap.currentPadding = 480;  // 10 ms currently sitting in hardware buffer
+    snap.streamLatencyHns = 100000; // 10 ms driver latency
+    snap.bufferFrameCount = 960;
+
+    output.clock().recordSnapshot(snap, std::chrono::steady_clock::now());
+
+    // WASAPI clock playhead: position / frequency = 768000 / 384000 = 2.0 seconds
+    TEST_ASSERT(std::abs(output.wasapiClockPlayheadSeconds() - 2.0) < 1e-9, 
+                "wasapiClockPlayheadSeconds() == 2.0s");
+
+    auto telem = output.getTelemetry();
+    TEST_ASSERT(std::abs(telem.wasapiClockPlayheadSec - 2.0) < 1e-9, 
+                "Telemetry wasapiClockPlayheadSec matches 2.0s");
+    TEST_ASSERT(telem.currentPadding == 480, 
+                "Telemetry reports currentPadding == 480");
+}
+
+void testSyncPulseGenerator() {
+    std::cout << "[TEST] SyncPulseGenerator Deterministic Pulse Generation\n";
+
+    syncwave::PulseParameters params;
+    params.leadInFrames = 24000;       // 500 ms at 48 kHz
+    params.pulseDurationFrames = 48;   // 1 ms at 48 kHz
+    params.leadOutFrames = 24000;      // 500 ms at 48 kHz
+    params.peakAmplitude = 1.0f;
+
+    syncwave::SyncPulseGenerator gen(params);
+
+    TEST_ASSERT(gen.pulseMasterFrameIndex() == 24000ULL, 
+                "Pulse impulse index is exactly frame 24,000 (after 500 ms lead-in)");
+    TEST_ASSERT(gen.totalFrames() == 48048ULL, 
+                "Total frames is 48,048 (24000 + 48 + 24000)");
+    TEST_ASSERT(!gen.isComplete(), "Generator is initially not complete");
+    TEST_ASSERT(gen.framesGenerated() == 0, "Current frame starts at 0");
+
+    // Read 24,000 frames (all lead-in silence)
+    std::vector<float> silenceBuf(24000 * 2, 999.0f);
+    size_t readLeadIn = gen.generateFrames(silenceBuf.data(), 24000, 2);
+    TEST_ASSERT(readLeadIn == 24000, "Generated 24,000 lead-in frames");
+    TEST_ASSERT(gen.framesGenerated() == 24000, "Current frame is now 24,000");
+
+    bool allSilent = true;
+    for (float val : silenceBuf) {
+        if (val != 0.0f) {
+            allSilent = false;
+            break;
+        }
+    }
+    TEST_ASSERT(allSilent, "All 24,000 lead-in frames are strictly zero (silence)");
+
+    // Read 48 frames (the pulse impulse)
+    std::vector<float> pulseBuf(48 * 2, 0.0f);
+    size_t readPulse = gen.generateFrames(pulseBuf.data(), 48, 2);
+    TEST_ASSERT(readPulse == 48, "Generated 48 pulse impulse frames");
+
+    float maxVal = 0.0f;
+    bool stereoMatched = true;
+    for (size_t f = 0; f < 48; ++f) {
+        float left = pulseBuf[f * 2];
+        float right = pulseBuf[f * 2 + 1];
+        if (left != right) stereoMatched = false;
+        if (left > maxVal) maxVal = left;
+        TEST_ASSERT(left >= 0.0f, "Half-sine impulse is non-negative");
+    }
+    TEST_ASSERT(stereoMatched, "Left and right channels are identical");
+    TEST_ASSERT(maxVal > 0.99f && maxVal <= 1.0f, "Peak impulse amplitude reaches ~1.0f");
+    TEST_ASSERT(pulseBuf[0] < 0.15f, "Impulse begins near 0.0f at start");
+    TEST_ASSERT(pulseBuf[47 * 2] < 0.15f, "Impulse returns near 0.0f at end");
+
+    // Read lead-out silence
+    std::vector<float> leadOutBuf(24000 * 2, 0.0f);
+    size_t readLeadOut = gen.generateFrames(leadOutBuf.data(), 24000, 2);
+    TEST_ASSERT(readLeadOut == 24000, "Generated 24,000 lead-out frames");
+    TEST_ASSERT(gen.isComplete(), "Generator is marked complete after total frames");
+
+    // Attempting further reads produces silence and returns 0 frames
+    std::vector<float> extraBuf(100 * 2, 1.0f);
+    size_t readExtra = gen.generateFrames(extraBuf.data(), 100, 2);
+    TEST_ASSERT(readExtra == 0, "Generating beyond totalFrames returns 0");
+    TEST_ASSERT(extraBuf[0] == 0.0f, "Buffer is cleared with silence");
+
+    // Test reset
+    gen.reset();
+    TEST_ASSERT(!gen.isComplete(), "After reset, generator is not complete");
+    TEST_ASSERT(gen.framesGenerated() == 0, "After reset, framesGenerated is 0");
+}
+
+void testOutputRouterMultiWindowPairwise() {
+    std::cout << "[TEST] OutputRouter Multi-Window Pairwise Drift Queries\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"dev-1", "Endpoint 1", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"dev-2", "Endpoint 2", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+    TEST_ASSERT(router.initializeOutputsForTesting(48000, 2), "Initialized outputs for testing");
+
+    auto* out1 = router.getOutput(0);
+    auto* out2 = router.getOutput(1);
+    TEST_ASSERT(out1 != nullptr && out2 != nullptr, "Retrieved outputs");
+
+    // Populate 60 samples (6 seconds @ 10 Hz)
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i <= 60; ++i) {
+        auto t = t0 + std::chrono::milliseconds(i * 100);
+
+        syncwave::WasapiClockSnapshot s1;
+        s1.isValid = true;
+        s1.position = i * 4800ULL;
+        s1.frequency = 48000;
+        s1.sampleRate = 48000;
+        s1.currentPadding = 480;
+        s1.streamLatencyHns = 100000;
+        s1.bufferFrameCount = 960;
+        out1->clock().recordSnapshot(s1, t);
+
+        syncwave::WasapiClockSnapshot s2;
+        s2.isValid = true;
+        s2.position = static_cast<uint64_t>(std::round(i * 4800.5));
+        s2.frequency = 48000;
+        s2.sampleRate = 48000;
+        s2.currentPadding = 480;
+        s2.streamLatencyHns = 100000;
+        s2.bufferFrameCount = 960;
+        out2->clock().recordSnapshot(s2, t);
+    }
+
+    auto pairsWin2 = router.getPairwiseDriftEstimatesOverWindow(2.0);
+    TEST_ASSERT(pairsWin2.size() == 1, "Exactly 1 pairwise estimate for 2 outputs");
+    TEST_ASSERT(pairsWin2[0].isValid, "Windowed pairwise estimate is valid");
+    TEST_ASSERT(pairsWin2[0].windowRequestedSec == 2.0, "Pairwise estimate windowRequestedSec is 2.0");
+    TEST_ASSERT(pairsWin2[0].sampleCountA <= 25, "Windowed pairwise used <= 25 samples");
+
+    auto pairsWin5 = router.getPairwiseDriftEstimatesOverWindow(5.0);
+    TEST_ASSERT(pairsWin5.size() == 1, "Windowed pairwise estimate for 5.0s exists");
+    TEST_ASSERT(pairsWin5[0].sampleCountA > pairsWin2[0].sampleCountA, 
+                "5s window used more samples than 2s window");
+
+    router.closeOutputs();
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 7)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 8)   \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -1402,6 +1751,15 @@ int main() {
     testDriftEstimatorRobustness();
     testWasapiClockSnapshotIntegration();
     testOutputRouterClockTelemetry();
+
+    // Milestone 8 Tests
+    testDeviceClockUnitsAndConversions();
+    testDeviceClockMultiWindowEstimation();
+    testDriftAndOffsetSeparation();
+    testDriftEstimatorWindowedAndConfidence();
+    testDeviceOutputPlayheadEstimation();
+    testSyncPulseGenerator();
+    testOutputRouterMultiWindowPairwise();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

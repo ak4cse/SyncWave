@@ -69,6 +69,9 @@ public:
     // Pairwise clock rate and drift estimation between all active output pairs
     [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimates() const;
 
+    // Pairwise clock rate and drift estimation over a specific trailing time window
+    [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimatesOverWindow(double windowSec) const;
+
     [[nodiscard]] bool allRunning() const;
     [[nodiscard]] bool anyRunning() const;
     [[nodiscard]] uint64_t totalFramesDistributed() const;

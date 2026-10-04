@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "../windows/WasapiOutput.h"
 #include <chrono>
@@ -15,7 +15,8 @@ struct DeviceClockSample {
     std::chrono::steady_clock::time_point timestamp;
     uint64_t clockPosition = 0;       // Raw ticks from IAudioClock or frames
     uint64_t qpcPosition = 0;         // QPC value when sampled
-    uint64_t clockFrequency = 0;      // Ticks per second
+    uint64_t qpcFrequency = 0;        // QPC performance counter frequency (ticks/sec)
+    uint64_t clockFrequency = 0;      // Hardware clock ticks per second
     uint32_t sampleRate = 0;          // Endpoint sample rate in Hz
     uint32_t bufferFrameCount = 0;    // Endpoint buffer capacity
     uint32_t currentPadding = 0;      // Queued frames in WASAPI buffer
@@ -33,13 +34,26 @@ struct DeviceClockSample {
         return (sampleRate > 0) ? (static_cast<double>(currentPadding) * 1000.0 / sampleRate) : 0.0;
     }
     [[nodiscard]] double positionSeconds() const {
-        return (clockFrequency > 0) ? (static_cast<double>(clockPosition) / clockFrequency) : 0.0;
+        return ticksToSeconds(clockPosition, clockFrequency);
     }
     [[nodiscard]] uint64_t positionFrames() const {
-        if (clockFrequency > 0 && sampleRate > 0) {
-            return static_cast<uint64_t>((static_cast<double>(clockPosition) * sampleRate) / clockFrequency);
+        return ticksToFrames(clockPosition, clockFrequency, sampleRate);
+    }
+    [[nodiscard]] double qpcSeconds() const {
+        return qpcToSeconds(qpcPosition, qpcFrequency);
+    }
+
+    [[nodiscard]] static double ticksToSeconds(uint64_t ticks, uint64_t clockFreq) {
+        return (clockFreq > 0) ? (static_cast<double>(ticks) / static_cast<double>(clockFreq)) : 0.0;
+    }
+    [[nodiscard]] static uint64_t ticksToFrames(uint64_t ticks, uint64_t clockFreq, uint32_t sRate) {
+        if (clockFreq > 0 && sRate > 0) {
+            return static_cast<uint64_t>((static_cast<double>(ticks) * sRate) / clockFreq);
         }
-        return clockPosition;
+        return 0;
+    }
+    [[nodiscard]] static double qpcToSeconds(uint64_t qpcTicks, uint64_t qpfFreq) {
+        return (qpfFreq > 0) ? (static_cast<double>(qpcTicks) / static_cast<double>(qpfFreq)) : 0.0;
     }
 };
 
@@ -48,14 +62,15 @@ struct ClockRateEstimate {
     uint32_t nominalRate = 0;             // Nominal sample rate (Hz)
     double estimatedRate = 0.0;           // Estimated observed rate (Hz)
     double rateErrorPpm = 0.0;            // Deviation from nominal in ppm
-    double measurementDurationSec = 0.0;  // Span between first and last sample
+    double measurementDurationSec = 0.0;  // Span between first and last sample in window
     size_t sampleCount = 0;
     double rSquared = 1.0;                // Goodness-of-fit (1.0 = ideal linear)
+    double windowRequestedSec = 0.0;      // Window requested (0 = entire history)
 };
 
 class DeviceClock {
 public:
-    explicit DeviceClock(std::string deviceId = "", uint32_t nominalSampleRate = 48000, size_t maxHistory = 128);
+    explicit DeviceClock(std::string deviceId = "", uint32_t nominalSampleRate = 48000, size_t maxHistory = 1024);
     ~DeviceClock() = default;
 
     DeviceClock(const DeviceClock&) = delete;
@@ -78,16 +93,29 @@ public:
     void setNominalSampleRate(uint32_t rate);
 
     [[nodiscard]] size_t sampleCount() const;
+    [[nodiscard]] std::optional<DeviceClockSample> firstSample() const;
     [[nodiscard]] std::optional<DeviceClockSample> latestSample() const;
     [[nodiscard]] std::vector<DeviceClockSample> getHistory() const;
 
-    // Compute effective clock rate using linear regression across sample history
+    // Total elapsed device-clock time (seconds) between first and latest sample
+    [[nodiscard]] double totalElapsedDeviceTimeSec() const;
+
+    // Total elapsed QPC reference time (seconds) between first and latest sample
+    [[nodiscard]] double totalElapsedQpcTimeSec() const;
+
+    // Compute effective clock rate using linear regression across entire sample history
     [[nodiscard]] ClockRateEstimate estimateRate() const;
+
+    // Compute effective clock rate over the most recent windowSec seconds of samples
+    [[nodiscard]] ClockRateEstimate estimateRateOverWindow(double windowSec) const;
+
+    // Query system QPC frequency (cached)
+    [[nodiscard]] static uint64_t getSystemQpcFrequency();
 
 private:
     std::string deviceId_;
     uint32_t nominalSampleRate_ = 48000;
-    size_t maxHistory_ = 128;
+    size_t maxHistory_ = 1024;
 
     mutable std::mutex mutex_;
     std::deque<DeviceClockSample> history_;

@@ -3,12 +3,26 @@
 #include <numeric>
 #include <algorithm>
 
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
 namespace syncwave {
+
+uint64_t DeviceClock::getSystemQpcFrequency() {
+    static uint64_t cachedQpf = []() -> uint64_t {
+        LARGE_INTEGER qpf;
+        if (QueryPerformanceFrequency(&qpf)) {
+            return static_cast<uint64_t>(qpf.QuadPart);
+        }
+        return 10000000ULL; // Standard fallback (10 MHz)
+    }();
+    return cachedQpf;
+}
 
 DeviceClock::DeviceClock(std::string deviceId, uint32_t nominalSampleRate, size_t maxHistory)
     : deviceId_(std::move(deviceId)),
       nominalSampleRate_(nominalSampleRate > 0 ? nominalSampleRate : 48000),
-      maxHistory_(maxHistory > 1 ? maxHistory : 128) {}
+      maxHistory_(maxHistory > 1 ? maxHistory : 1024) {}
 
 DeviceClock::DeviceClock(DeviceClock&& other) noexcept {
     std::lock_guard<std::mutex> lock(other.mutex_);
@@ -47,6 +61,7 @@ void DeviceClock::recordSnapshot(const WasapiClockSnapshot& snapshot,
     sample.timestamp = timestamp;
     sample.clockPosition = snapshot.position;
     sample.qpcPosition = snapshot.qpcPosition;
+    sample.qpcFrequency = getSystemQpcFrequency();
     sample.clockFrequency = snapshot.frequency;
     sample.sampleRate = snapshot.sampleRate > 0 ? snapshot.sampleRate : nominalSampleRate_;
     sample.bufferFrameCount = snapshot.bufferFrameCount;
@@ -82,6 +97,14 @@ size_t DeviceClock::sampleCount() const {
     return history_.size();
 }
 
+std::optional<DeviceClockSample> DeviceClock::firstSample() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (history_.empty()) {
+        return std::nullopt;
+    }
+    return history_.front();
+}
+
 std::optional<DeviceClockSample> DeviceClock::latestSample() const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (history_.empty()) {
@@ -95,11 +118,37 @@ std::vector<DeviceClockSample> DeviceClock::getHistory() const {
     return std::vector<DeviceClockSample>(history_.begin(), history_.end());
 }
 
+double DeviceClock::totalElapsedDeviceTimeSec() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (history_.size() < 2) {
+        return 0.0;
+    }
+    return history_.back().positionSeconds() - history_.front().positionSeconds();
+}
+
+double DeviceClock::totalElapsedQpcTimeSec() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (history_.size() < 2) {
+        return 0.0;
+    }
+    const auto& s0 = history_.front();
+    const auto& s1 = history_.back();
+    if (s0.qpcFrequency > 0 && s1.qpcPosition >= s0.qpcPosition) {
+        return static_cast<double>(s1.qpcPosition - s0.qpcPosition) / static_cast<double>(s0.qpcFrequency);
+    }
+    return std::chrono::duration<double>(s1.timestamp - s0.timestamp).count();
+}
+
 ClockRateEstimate DeviceClock::estimateRate() const {
+    return estimateRateOverWindow(0.0);
+}
+
+ClockRateEstimate DeviceClock::estimateRateOverWindow(double windowSec) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
     ClockRateEstimate est;
     est.nominalRate = nominalSampleRate_;
+    est.windowRequestedSec = windowSec;
 
     if (history_.size() < 2) {
         est.isValid = false;
@@ -107,9 +156,29 @@ ClockRateEstimate DeviceClock::estimateRate() const {
         return est;
     }
 
-    const size_t N = history_.size();
-    const auto t0 = history_.front().timestamp;
+    // Determine start index based on windowSec
+    size_t startIdx = 0;
+    const auto latestTime = history_.back().timestamp;
+    if (windowSec > 0.0) {
+        const auto cutoff = latestTime - std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                             std::chrono::duration<double>(windowSec));
+        while (startIdx < history_.size() && history_[startIdx].timestamp < cutoff) {
+            startIdx++;
+        }
+        // Ensure at least 2 samples remain for the window
+        if (history_.size() - startIdx < 2 && history_.size() >= 2) {
+            startIdx = history_.size() - 2;
+        }
+    }
 
+    const size_t N = history_.size() - startIdx;
+    if (N < 2) {
+        est.isValid = false;
+        est.sampleCount = N;
+        return est;
+    }
+
+    const auto t0 = history_[startIdx].timestamp;
     std::vector<double> t(N);
     std::vector<double> p(N);
 
@@ -117,12 +186,12 @@ ClockRateEstimate DeviceClock::estimateRate() const {
     double sumP = 0.0;
 
     for (size_t i = 0; i < N; ++i) {
-        const auto& s = history_[i];
+        const auto& s = history_[startIdx + i];
         t[i] = std::chrono::duration<double>(s.timestamp - t0).count();
 
         // Calculate cumulative frames from clock position
         if (s.clockFrequency > 0 && s.sampleRate > 0) {
-            p[i] = (static_cast<double>(s.clockPosition) * s.sampleRate) / s.clockFrequency;
+            p[i] = (static_cast<double>(s.clockPosition) * s.sampleRate) / static_cast<double>(s.clockFrequency);
         } else {
             p[i] = static_cast<double>(s.clockPosition);
         }

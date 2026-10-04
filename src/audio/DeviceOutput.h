@@ -37,6 +37,12 @@ struct DeviceOutputTelemetry {
     double rateErrorPpm = 0.0;
     double measurementDurationSec = 0.0;
     size_t clockSampleCount = 0;
+    uint64_t estimatedAppPlayheadFrames = 0;
+    double estimatedAppPlayheadSec = 0.0;
+    double wasapiClockPlayheadSec = 0.0;
+    double playheadDiscrepancyMs = 0.0;
+    uint64_t masterTimelineFrames = 0;
+    double masterTimelineSec = 0.0;
     bool isAvailable = true;
 };
 
@@ -85,6 +91,14 @@ public:
 
     [[nodiscard]] DeviceClock& clock() { return clock_; }
     [[nodiscard]] const DeviceClock& clock() const { return clock_; }
+
+    // Playhead estimation methods
+    [[nodiscard]] uint64_t estimatedAppPlayheadFrames() const;
+    [[nodiscard]] double estimatedAppPlayheadSeconds() const;
+    [[nodiscard]] double wasapiClockPlayheadSeconds() const;
+    [[nodiscard]] double playheadDiscrepancyMs() const;
+    [[nodiscard]] uint64_t masterTimelineFrames() const;
+    [[nodiscard]] double masterTimelineSeconds() const;
 
     [[nodiscard]] DeviceOutputTelemetry getTelemetry() const;
 

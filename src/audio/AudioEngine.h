@@ -4,6 +4,7 @@
 #include "ToneGenerator.h"
 #include "MasterAudioBus.h"
 #include "OutputRouter.h"
+#include "../sync/SyncPulseGenerator.h"
 #include "../windows/DeviceManager.h"
 #include <string>
 #include <vector>
@@ -54,6 +55,9 @@ struct EngineDiagnostics {
 
     bool isRunning = false;
     bool isCaptureMode = false;
+    bool isPulseMode = false;
+    bool isPulseComplete = false;
+    uint64_t pulseMasterFrameIndex = 0;
 };
 
 class AudioEngine {
@@ -75,6 +79,10 @@ public:
     bool startTone(const std::vector<AudioDevice>& devices, const ToneParameters& params);
     bool startTone(const std::vector<std::string>& deviceIds, const ToneParameters& params);
 
+    // Start deterministic pulse test routed through MasterAudioBus into target endpoint(s)
+    bool startPulse(const std::vector<AudioDevice>& devices, const PulseParameters& params = {});
+    bool startPulse(const std::vector<std::string>& deviceIds, const PulseParameters& params = {});
+
     // Start system audio loopback capture routed through MasterAudioBus into output endpoint(s)
     bool startCapture(const std::string& captureDeviceId = "", const std::string& outputDeviceId = "");
     bool startCapture(const AudioDevice& captureDevice, const AudioDevice& outputDevice);
@@ -89,6 +97,7 @@ public:
 
     [[nodiscard]] bool isRunning() const;
     [[nodiscard]] EngineDiagnostics getDiagnostics() const;
+    [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimatesOverWindow(double windowSec) const;
     [[nodiscard]] MasterAudioBus& masterBus() { return masterBus_; }
     [[nodiscard]] OutputRouter& outputRouter() { return router_; }
     [[nodiscard]] WasapiCapture* capture() { return capture_.get(); }
@@ -98,6 +107,7 @@ private:
 
     std::unique_ptr<WasapiCapture> capture_;
     ToneGenerator toneGen_;
+    SyncPulseGenerator pulseGen_;
     MasterAudioBus masterBus_;
     OutputRouter router_;
     ToneParameters currentParams_;
@@ -105,6 +115,7 @@ private:
     std::thread producerThread_;
     std::atomic<bool> producerRunning_{false};
     bool isCaptureMode_ = false;
+    bool isPulseMode_ = false;
     EngineDiagnostics lastDiag_{};
 };
 

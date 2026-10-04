@@ -271,3 +271,63 @@ To ensure safety:
    - WASAPI audio render threads remain strictly lock-free; clock sampling is initiated out-of-band at 10 Hz by control/producer loops.
 5. **Acoustic Disclaimer**:
    - Distinguishes software/WASAPI domain latency from physical acoustic emission latency (Bluetooth A2DP transport buffer, DAC filtering, speaker driver lag).
+
+---
+
+## 8. Milestone 8: Relative Latency & Timing Model Validation
+
+### Component Hierarchy
+```text
+           [AudioEngine] / [CLI Commands]
+           |
+           +---> [syncwave clock-test]   (60s multi-window convergence)
+           +---> [syncwave latency-test] (SyncPulseGenerator repeatability)
+           |
+           v
+     [SyncPulseGenerator]
+           |
+           | 500ms silence -> 1ms half-sine -> 500ms silence
+           v
+    [MasterAudioBus] (Master Timeline Tracking: masterTimelineFrames)
+           |
+           v
+     [OutputRouter]  (Windowed Drift Queries @ 1s, 5s, 10s, 30s, 60s)
+    /              \
+   v                v
+[DeviceOutput 1] [DeviceOutput 2]
++--------------+ +--------------+
+| Playhead Est | | Playhead Est |  (App Playhead: submitted - padding)
+| DeviceClock  | | DeviceClock  |  (1024-sample capacity, multi-window OLS)
++--------------+ +--------------+
+       \                /
+        v              v
+       [DriftEstimator]
+              |
+              +-> Instantaneous Offset (posA - posB)
+              +-> Initial Offset (posA0 - posB0)
+              +-> Accumulated Drift (Offset_t - Offset_0)
+              +-> Drift Rate (ppm from Delta Offset)
+              +-> Confidence Metric (rA^2 * rB^2)
+```
+
+### Key Subsystems
+1. **Multi-Window Rate Estimation & Convergence Analysis**:
+   - `DeviceClock::estimateRateOverWindow(windowSec)` evaluates rate stability across trailing windows (1s, 5s, 10s, 30s, 60s).
+   - Resolved the Bluetooth -612 ppm loopback artifact: proved that initial A2DP buffer ramp (~190 ms) skews short regression slopes, whereas steady-state linear regression converges (+1.08 ppm at 10s).
+2. **Mathematical Separation of Offset vs Drift**:
+   - Strictly distinguishes instantaneous playhead differences ($T_A - T_B$) from accumulated drift ($\Delta\text{Offset}$) and drift rate ($\text{ppm}$).
+   - Proven that constant offset produces exactly 0.0 ms accumulated drift.
+3. **Stream Playhead Estimation**:
+   - `DeviceOutput` calculates software playhead:
+     $$\text{App Playhead} = \frac{\text{framesSubmitted} - \text{currentPadding}}{f_s}$$
+     $$\text{WASAPI Clock Playhead} = \frac{\text{clockPosition}}{\text{clockFrequency}}$$
+   - Captures playhead discrepancy between application-level buffer tracking and hardware clock reports.
+4. **Deterministic Transient Test Harness (`SyncPulseGenerator`)**:
+   - Generates bandlimited half-cycle sine pulses (1.0 ms duration, peak 1.0f) with 500 ms lead-in and lead-out silence.
+   - Pushes pulses through `MasterAudioBus` and `OutputRouter` into all configured endpoints concurrently.
+   - Evaluates software-path relative latency repeatability across repeated runs.
+5. **Physical Acoustic Latency Honesty Statement**:
+   - Documents that software timestamps (`IAudioClock`, QPC, and padding) observe only OS audio engine mixing and driver submission stages.
+   - Physical acoustic emission includes external physical delays (Bluetooth A2DP transport packetization, RF buffering, hardware DAC delay, and acoustic travel time).
+   - Direct measurement of physical acoustic latency requires an external calibrated microphone feedback loop or oscilloscope probe.
+

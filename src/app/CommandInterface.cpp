@@ -18,7 +18,7 @@
 
 namespace syncwave {
 
-constexpr const char* SYNCWAVE_VERSION = "0.6.0-alpha";
+constexpr const char* SYNCWAVE_VERSION = "0.8.0-alpha";
 
 static std::atomic<bool> g_stopRequested{false};
 
@@ -59,6 +59,8 @@ void CommandInterface::printHelp() const {
               << "  syncwave watch [--timeout <sec>]           Monitor audio endpoint changes in real time\n"
               << "  syncwave tone [options]                    Play synthetic PCM sine wave through Master Audio Bus\n"
               << "  syncwave capture [options]                 Capture Windows system audio via WASAPI Loopback and route to outputs\n"
+              << "  syncwave clock-test [options]              Run high-precision 60s clock drift and stability experiment\n"
+              << "  syncwave latency-test [options]            Run deterministic transient pulse test to evaluate software latency\n"
               << "  syncwave status                            Display engine, router, and master audio bus status\n"
               << "  syncwave help                              Show this help message\n"
               << "  syncwave --version                         Display version\n\n"
@@ -72,7 +74,13 @@ void CommandInterface::printHelp() const {
               << "  --outputs, -O <id1,id2,...>                Comma-separated list of target output endpoints\n"
               << "  --frequency, -f <Hz>                       Tone frequency in Hz (default: 440 Hz)\n"
               << "  --duration, -t <sec>                       Playback duration in seconds (0 = continuous, default: 5s)\n"
-              << "  --volume, -v <0.0..1.0>                    Volume amplitude level (default: 0.25)\n\n";
+              << "  --volume, -v <0.0..1.0>                    Volume amplitude level (default: 0.25)\n\n"
+              << "Options for 'clock-test':\n"
+              << "  --outputs, -O <id1,id2,...>                Target output endpoints (default: first two active endpoints)\n"
+              << "  --duration, -t <sec>                       Duration in seconds (default: 60s)\n\n"
+              << "Options for 'latency-test':\n"
+              << "  --outputs, -O <id1,id2,...>                Target output endpoints (default: first two active endpoints)\n"
+              << "  --runs, -n <count>                         Number of repeated test runs (default: 5)\n\n";
 }
 
 int CommandInterface::handleDevicesCommand(const std::vector<std::string>& args) {
@@ -657,6 +665,357 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
     return 0;
 }
 
+int CommandInterface::handleClockTestCommand(const std::vector<std::string>& args) {
+    std::vector<std::string> outputSpecs;
+    double durationSec = 60.0;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        if ((args[i] == "--outputs" || args[i] == "-O") && i + 1 < args.size()) {
+            auto tokens = splitString(args[++i], ',');
+            outputSpecs.insert(outputSpecs.end(), tokens.begin(), tokens.end());
+        } else if ((args[i] == "--output" || args[i] == "-o" || args[i] == "--device" || args[i] == "-d") && i + 1 < args.size()) {
+            outputSpecs.push_back(args[++i]);
+        } else if ((args[i] == "--duration" || args[i] == "-t") && i + 1 < args.size()) {
+            durationSec = std::stod(args[++i]);
+        }
+    }
+
+    auto activeDevices = deviceManager_->enumerateDevices(true);
+    if (activeDevices.empty()) {
+        std::cerr << "Error: No active audio output devices available.\n";
+        return 1;
+    }
+
+    std::vector<AudioDevice> targets;
+    if (outputSpecs.empty()) {
+        if (activeDevices.size() >= 2) {
+            targets.push_back(activeDevices[0]);
+            targets.push_back(activeDevices[1]);
+        } else {
+            targets.push_back(activeDevices[0]);
+        }
+    } else {
+        for (const auto& spec : outputSpecs) {
+            try {
+                size_t idx = std::stoul(spec);
+                if (idx < activeDevices.size()) {
+                    targets.push_back(activeDevices[idx]);
+                    continue;
+                }
+            } catch (...) {}
+            auto dev = deviceManager_->getDeviceById(spec);
+            if (dev) {
+                targets.push_back(*dev);
+            } else {
+                std::cerr << "Error: Unknown output device: " << spec << "\n";
+                return 1;
+            }
+        }
+    }
+
+    std::cout << "\nSyncWave High-Precision Clock & Drift Experiment\n";
+    std::cout << "=================================================\n\n";
+    std::cout << "Target Endpoints (" << targets.size() << "):\n";
+    for (size_t i = 0; i < targets.size(); ++i) {
+        std::cout << "  [" << i << "] " << targets[i].name << "\n";
+    }
+    std::cout << "\nTest Configuration:\n";
+    std::cout << "  Duration:          " << durationSec << " seconds\n";
+    std::cout << "  Sampling Rate:     10 Hz (every 100 ms out-of-band)\n";
+    std::cout << "  Signal:            440 Hz continuous tone (volume 0.25)\n\n";
+
+    g_stopRequested.store(false);
+    SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+
+    ToneParameters params{ 440.0, 0.25, 0.0 };
+    if (!audioEngine_->startTone(targets, params)) {
+        std::cerr << "Error: Failed to initialize multi-output playback for clock experiment.\n";
+        SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
+        return 1;
+    }
+
+    std::cout << "Clock experiment running. Press Ctrl+C to abort early.\n";
+
+    auto startTime = std::chrono::steady_clock::now();
+    while (!g_stopRequested.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        audioEngine_->sampleClocks();
+
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - startTime).count();
+        if (durationSec > 0.0 && elapsed >= durationSec) {
+            break;
+        }
+
+        std::cout << "\r[Running] Elapsed: " << std::fixed << std::setprecision(1) << elapsed 
+                  << " s / " << durationSec << " s" << std::flush;
+    }
+    std::cout << "\n\nStopping engine and compiling clock telemetry...\n";
+
+    audioEngine_->stop();
+    SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
+
+    auto finalDiag = audioEngine_->getDiagnostics();
+
+    // 1. Detailed per-endpoint clock summary
+    std::cout << "\n=======================================================\n";
+    std::cout << "               CLOCK TELEMETRY SUMMARY                 \n";
+    std::cout << "=======================================================\n";
+
+    for (size_t i = 0; i < finalDiag.outputs.size(); ++i) {
+        const auto& out = finalDiag.outputs[i];
+        std::cout << "\n[" << i << "] " << out.deviceName << "\n";
+        std::cout << "    Nominal Rate:         " << out.format.sampleRate << " Hz\n";
+        std::cout << "    Clock Frequency:      " << out.clockFrequency << " Hz (" 
+                  << (out.format.sampleRate > 0 ? (out.clockFrequency / out.format.sampleRate) : 0) << " ticks/frame)\n";
+        std::cout << "    Final Clock Position: " << out.clockPosition << " ticks ("
+                  << (out.clockFrequency > 0 ? (static_cast<double>(out.clockPosition) / out.clockFrequency) : 0.0) << " s)\n";
+        std::cout << "    Estimated Rate:       " << std::fixed << std::setprecision(2) << out.estimatedClockRateHz << " Hz\n";
+        std::cout << "    Rate Error (PPM):     " << (out.rateErrorPpm >= 0.0 ? "+" : "") << out.rateErrorPpm << " ppm\n";
+        std::cout << "    Samples Recorded:     " << out.clockSampleCount << " samples\n";
+        std::cout << "    Measurement Span:     " << out.measurementDurationSec << " s\n";
+        std::cout << "    Current Padding:      " << out.currentPadding << " frames ("
+                  << (out.format.sampleRate > 0 ? (out.currentPadding * 1000.0 / out.format.sampleRate) : 0.0) << " ms)\n";
+        std::cout << "    WASAPI Underruns:     " << out.wasapiUnderruns << "\n";
+    }
+
+    // 2. Multi-Window Convergence Analysis Table
+    std::cout << "\n=======================================================\n";
+    std::cout << "         MULTI-WINDOW CLOCK STABILITY ANALYSIS         \n";
+    std::cout << "=======================================================\n";
+    std::cout << "Evaluating rate convergence across trailing time windows:\n\n";
+
+    std::vector<double> windows = { 1.0, 5.0, 10.0, 30.0, 60.0 };
+
+    for (size_t i = 0; i < finalDiag.outputs.size(); ++i) {
+        auto* devOut = audioEngine_->outputRouter().getOutput(i);
+        if (!devOut) continue;
+        std::cout << "Device [" << i << "]: " << devOut->deviceName() << "\n";
+        std::cout << "  Window      Estimated Rate       Rate Error (PPM)     Goodness-of-Fit (r^2)\n";
+        std::cout << "  ---------------------------------------------------------------------------\n";
+
+        for (double win : windows) {
+            auto est = devOut->clock().estimateRateOverWindow(win);
+            if (est.isValid) {
+                std::cout << "  " << std::setw(4) << static_cast<int>(win) << " s       "
+                          << std::setw(12) << std::fixed << std::setprecision(2) << est.estimatedRate << " Hz       "
+                          << std::setw(11) << (est.rateErrorPpm >= 0.0 ? "+" : "") << est.rateErrorPpm << " ppm        "
+                          << std::setw(6) << std::setprecision(5) << est.rSquared << "\n";
+            } else {
+                std::cout << "  " << std::setw(4) << static_cast<int>(win) << " s       (insufficient samples in window)\n";
+            }
+        }
+        std::cout << "\n";
+    }
+
+    // 3. Pairwise Relative Drift & Offset Separation
+    std::cout << "=======================================================\n";
+    std::cout << "         PAIRWISE DRIFT & OFFSET SEPARATION            \n";
+    std::cout << "=======================================================\n";
+
+    auto pairs = audioEngine_->outputRouter().getPairwiseDriftEstimates();
+    if (pairs.empty()) {
+        std::cout << "  (Single endpoint configured - no pairwise combinations)\n\n";
+    } else {
+        for (const auto& pair : pairs) {
+            std::cout << "  " << pair.deviceNameA << " <-> " << pair.deviceNameB << ":\n";
+            if (pair.isValid) {
+                std::cout << "      Relative Drift Rate:  " << (pair.driftRatePpm >= 0.0 ? "+" : "") << pair.driftRatePpm << " ppm\n";
+                std::cout << "      Normalized Ratio:     " << std::setprecision(6) << pair.rateRatio << " (A / B)\n";
+                std::cout << "      Initial Offset:       " << std::setprecision(2) << (pair.initialOffsetSec * 1000.0) << " ms\n";
+                std::cout << "      Final Offset:         " << (pair.instantaneousOffsetSec * 1000.0) << " ms\n";
+                std::cout << "      Accumulated Drift:    " << (pair.accumulatedDriftSec * 1000.0) << " ms\n";
+                std::cout << "      Measurement Duration: " << pair.measurementDurationSec << " s\n";
+                std::cout << "      Confidence (r^2):     " << std::setprecision(4) << pair.confidence << "\n";
+            } else {
+                std::cout << "      Status: accumulating timing samples...\n";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    std::cout << "[TIMING NOTE] Software timestamps and WASAPI stream latency do NOT measure physical acoustic latency.\n"
+              << "Hardware DAC filtering, Bluetooth A2DP transport buffering, and speaker drivers introduce additional delay.\n"
+              << "Delay alignment and acoustic synchronization will be implemented in Milestones 8+.\n\n";
+
+    return 0;
+}
+
+int CommandInterface::handleLatencyTestCommand(const std::vector<std::string>& args) {
+    std::vector<std::string> outputSpecs;
+    int numRuns = 5;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        if ((args[i] == "--outputs" || args[i] == "-O") && i + 1 < args.size()) {
+            auto tokens = splitString(args[++i], ',');
+            outputSpecs.insert(outputSpecs.end(), tokens.begin(), tokens.end());
+        } else if ((args[i] == "--output" || args[i] == "-o" || args[i] == "--device" || args[i] == "-d") && i + 1 < args.size()) {
+            outputSpecs.push_back(args[++i]);
+        } else if ((args[i] == "--runs" || args[i] == "-n") && i + 1 < args.size()) {
+            numRuns = std::stoi(args[++i]);
+            if (numRuns < 1) numRuns = 1;
+        }
+    }
+
+    auto activeDevices = deviceManager_->enumerateDevices(true);
+    if (activeDevices.size() < 2) {
+        std::cerr << "Error: Relative latency test requires at least 2 active audio output endpoints (found " 
+                  << activeDevices.size() << ").\n";
+        return 1;
+    }
+
+    std::vector<AudioDevice> targets;
+    if (outputSpecs.empty()) {
+        targets.push_back(activeDevices[0]);
+        targets.push_back(activeDevices[1]);
+    } else {
+        for (const auto& spec : outputSpecs) {
+            try {
+                size_t idx = std::stoul(spec);
+                if (idx < activeDevices.size()) {
+                    targets.push_back(activeDevices[idx]);
+                    continue;
+                }
+            } catch (...) {}
+            auto dev = deviceManager_->getDeviceById(spec);
+            if (dev) {
+                targets.push_back(*dev);
+            } else {
+                std::cerr << "Error: Unknown output device: " << spec << "\n";
+                return 1;
+            }
+        }
+    }
+
+    if (targets.size() < 2) {
+        std::cerr << "Error: Please select at least 2 output endpoints for relative latency comparison.\n";
+        return 1;
+    }
+
+    std::cout << "\nSyncWave Deterministic Transient & Software Latency Test\n";
+    std::cout << "========================================================\n\n";
+    std::cout << "Target Endpoints (" << targets.size() << "):\n";
+    for (size_t i = 0; i < targets.size(); ++i) {
+        std::cout << "  [" << i << "] " << targets[i].name << "\n";
+    }
+    std::cout << "\nSignal Specification:\n";
+    std::cout << "  Type:              SyncPulseGenerator\n";
+    std::cout << "  Structure:         500 ms silence -> 1 ms impulse (peak 1.0f) -> 500 ms silence\n";
+    std::cout << "  Repeated Runs:     " << numRuns << "\n\n";
+
+    g_stopRequested.store(false);
+    SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
+
+    std::vector<double> relativeLatenciesMs;
+    relativeLatenciesMs.reserve(numRuns);
+
+    PulseParameters pulseParams;
+    pulseParams.leadInFrames = 24000;      // 500 ms @ 48kHz
+    pulseParams.pulseDurationFrames = 48;  // 1 ms @ 48kHz
+    pulseParams.leadOutFrames = 24000;     // 500 ms @ 48kHz
+    pulseParams.peakAmplitude = 1.0f;
+
+    for (int run = 1; run <= numRuns && !g_stopRequested.load(); ++run) {
+        std::cout << "Run " << run << " of " << numRuns << "... " << std::flush;
+
+        if (!audioEngine_->startPulse(targets, pulseParams)) {
+            std::cerr << "\nError: Failed to launch pulse generator on run " << run << "\n";
+            break;
+        }
+
+        // Wait for pulse sequence to play (~1.2 seconds)
+        auto pulseStart = std::chrono::steady_clock::now();
+        while (!g_stopRequested.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            audioEngine_->sampleClocks();
+
+            auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - pulseStart).count();
+            if (elapsed >= 1.2) {
+                break;
+            }
+        }
+
+        auto diag = audioEngine_->getDiagnostics();
+        audioEngine_->stop();
+
+        if (diag.outputs.size() >= 2) {
+            const auto& out0 = diag.outputs[0];
+            const auto& out1 = diag.outputs[1];
+
+            // Software relative latency: playhead difference at measurement end
+            double deltaMs = (out0.estimatedAppPlayheadSec - out1.estimatedAppPlayheadSec) * 1000.0;
+            relativeLatenciesMs.push_back(deltaMs);
+
+            std::cout << "Relative Software Latency: " << std::fixed << std::setprecision(2) << deltaMs << " ms "
+                      << "(Playhead0: " << (out0.estimatedAppPlayheadSec * 1000.0) << " ms, "
+                      << "Playhead1: " << (out1.estimatedAppPlayheadSec * 1000.0) << " ms)\n";
+        } else {
+            std::cout << "(insufficient outputs active in run)\n";
+        }
+
+        // Brief cooldown between runs
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);
+
+    if (relativeLatenciesMs.empty()) {
+        std::cerr << "No successful test runs recorded.\n";
+        return 1;
+    }
+
+    // Compute repeatability statistics
+    double sum = 0.0;
+    double minVal = relativeLatenciesMs[0];
+    double maxVal = relativeLatenciesMs[0];
+    for (double val : relativeLatenciesMs) {
+        sum += val;
+        minVal = std::min(minVal, val);
+        maxVal = std::max(maxVal, val);
+    }
+    double mean = sum / relativeLatenciesMs.size();
+
+    auto sortedVals = relativeLatenciesMs;
+    std::sort(sortedVals.begin(), sortedVals.end());
+    double median = (sortedVals.size() % 2 == 1)
+                        ? sortedVals[sortedVals.size() / 2]
+                        : (sortedVals[sortedVals.size() / 2 - 1] + sortedVals[sortedVals.size() / 2]) / 2.0;
+
+    double varSum = 0.0;
+    for (double val : relativeLatenciesMs) {
+        double diff = val - mean;
+        varSum += diff * diff;
+    }
+    double stdDev = (relativeLatenciesMs.size() > 1) ? std::sqrt(varSum / (relativeLatenciesMs.size() - 1)) : 0.0;
+
+    std::cout << "\n=======================================================\n";
+    std::cout << "       TRANSIENT TEST REPEATABILITY STATISTICS         \n";
+    std::cout << "=======================================================\n";
+    std::cout << "Outputs Compared: " << targets[0].name << " vs " << targets[1].name << "\n";
+    std::cout << "Successful Runs:  " << relativeLatenciesMs.size() << " / " << numRuns << "\n";
+    std::cout << "Mean Latency:     " << std::fixed << std::setprecision(2) << mean << " ms\n";
+    std::cout << "Median Latency:   " << median << " ms\n";
+    std::cout << "Min Latency:      " << minVal << " ms\n";
+    std::cout << "Max Latency:      " << maxVal << " ms\n";
+    std::cout << "Std Deviation:    " << stdDev << " ms\n\n";
+
+    std::cout << "=======================================================\n";
+    std::cout << "       PHYSICAL / ACOUSTIC LATENCY ASSESSMENT          \n";
+    std::cout << "=======================================================\n";
+    std::cout << "Status:           PHYSICAL ACOUSTIC LATENCY NOT DIRECTLY MEASURABLE WITH CURRENT SETUP\n";
+    std::cout << "Explanation:      Windows software timestamps (IAudioClock and QPC) and WASAPI stream\n"
+              << "                  latency observe only the OS mixing and driver submission stages.\n"
+              << "                  Physical acoustic emission includes external physical delays:\n"
+              << "                    - Bluetooth A2DP transport packetization and RF transmission delay\n"
+              << "                    - Hardware DAC reconstruction / anti-aliasing filter delay\n"
+              << "                    - Transducer electromechanical latency and room air flight time\n"
+              << "                  Direct measurement of physical acoustic latency requires an external\n"
+              << "                  calibrated microphone feedback loop or oscilloscope probe.\n"
+              << "                  Physical delay alignment is scheduled for Milestones 9+.\n\n";
+
+    return 0;
+}
+
 int CommandInterface::run(int argc, char* argv[]) {
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
@@ -679,6 +1038,10 @@ int CommandInterface::run(int argc, char* argv[]) {
         return handleToneCommand(subArgs);
     } else if (cmd == "capture" || cmd == "loopback") {
         return handleCaptureCommand(subArgs);
+    } else if (cmd == "clock-test") {
+        return handleClockTestCommand(subArgs);
+    } else if (cmd == "latency-test") {
+        return handleLatencyTestCommand(subArgs);
     } else if (cmd == "status" || cmd == "diag") {
         return handleStatusCommand(subArgs);
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {

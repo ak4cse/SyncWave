@@ -205,7 +205,81 @@ DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
     t.queueUnderruns = queueUnderruns_.load(std::memory_order_relaxed);
     t.queueOverruns = queueOverruns_.load(std::memory_order_relaxed);
 
+    // Application-level estimated playhead (frames submitted - current padding)
+    uint64_t submitted = t.framesSubmitted;
+    uint32_t pad = t.currentPadding;
+    t.estimatedAppPlayheadFrames = (submitted > pad) ? (submitted - pad) : 0;
+    t.estimatedAppPlayheadSec = (format_.sampleRate > 0)
+                                    ? (static_cast<double>(t.estimatedAppPlayheadFrames) / format_.sampleRate)
+                                    : 0.0;
+
+    // Hardware clock playhead (ticks / clock frequency)
+    t.wasapiClockPlayheadSec = (t.clockFrequency > 0)
+                                   ? (static_cast<double>(t.clockPosition) / static_cast<double>(t.clockFrequency))
+                                   : 0.0;
+
+    // Discrepancy between application and hardware clock playheads
+    t.playheadDiscrepancyMs = (t.estimatedAppPlayheadSec - t.wasapiClockPlayheadSec) * 1000.0;
+
+    // Master timeline position for this output
+    uint64_t routed = t.framesRouted;
+    uint64_t qAvail = t.queueAvailable;
+    t.masterTimelineFrames = (routed > qAvail) ? (routed - qAvail) : 0;
+    t.masterTimelineSec = (masterSampleRate_ > 0)
+                              ? (static_cast<double>(t.masterTimelineFrames) / masterSampleRate_)
+                              : 0.0;
+
     return t;
+}
+
+uint64_t DeviceOutput::estimatedAppPlayheadFrames() const {
+    uint64_t submitted = wasapiOutput_ ? wasapiOutput_->framesRendered() : 0;
+    uint32_t pad = 0;
+    if (wasapiOutput_) {
+        auto snap = wasapiOutput_->getClockSnapshot();
+        pad = snap.currentPadding;
+    } else {
+        auto latest = clock_.latestSample();
+        if (latest) {
+            pad = latest->currentPadding;
+            submitted = latest->framesRendered;
+        }
+    }
+    return (submitted > pad) ? (submitted - pad) : 0;
+}
+
+double DeviceOutput::estimatedAppPlayheadSeconds() const {
+    if (format_.sampleRate == 0) return 0.0;
+    return static_cast<double>(estimatedAppPlayheadFrames()) / static_cast<double>(format_.sampleRate);
+}
+
+double DeviceOutput::wasapiClockPlayheadSeconds() const {
+    if (wasapiOutput_) {
+        auto snap = wasapiOutput_->getClockSnapshot();
+        if (snap.isValid && snap.frequency > 0) {
+            return static_cast<double>(snap.position) / static_cast<double>(snap.frequency);
+        }
+    }
+    auto latest = clock_.latestSample();
+    if (latest && latest->isValid) {
+        return latest->positionSeconds();
+    }
+    return 0.0;
+}
+
+double DeviceOutput::playheadDiscrepancyMs() const {
+    return (estimatedAppPlayheadSeconds() - wasapiClockPlayheadSeconds()) * 1000.0;
+}
+
+uint64_t DeviceOutput::masterTimelineFrames() const {
+    uint64_t routed = framesRouted_.load(std::memory_order_relaxed);
+    uint64_t qAvail = queue_ ? queue_->availableToRead() : 0;
+    return (routed > qAvail) ? (routed - qAvail) : 0;
+}
+
+double DeviceOutput::masterTimelineSeconds() const {
+    if (masterSampleRate_ == 0) return 0.0;
+    return static_cast<double>(masterTimelineFrames()) / static_cast<double>(masterSampleRate_);
 }
 
 } // namespace syncwave

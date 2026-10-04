@@ -238,6 +238,10 @@ void OutputRouter::sampleAllClocks(std::chrono::steady_clock::time_point timesta
 }
 
 std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimates() const {
+    return getPairwiseDriftEstimatesOverWindow(0.0);
+}
+
+std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimatesOverWindow(double windowSec) const {
     std::lock_guard<std::mutex> lock(outputMutex_);
     std::vector<PairwiseDriftEstimate> results;
 
@@ -250,8 +254,8 @@ std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimates() con
             const auto& outA = outputs_[i];
             const auto& outB = outputs_[j];
             if (outA->isAvailable() && outB->isAvailable()) {
-                auto estimate = DriftEstimator::estimate(
-                    outA->clock(), outB->clock(),
+                auto estimate = DriftEstimator::estimateOverWindow(
+                    outA->clock(), outB->clock(), windowSec,
                     outA->deviceName(), outB->deviceName()
                 );
                 results.push_back(estimate);

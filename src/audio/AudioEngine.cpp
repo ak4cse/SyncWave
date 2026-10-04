@@ -25,7 +25,11 @@ void AudioEngine::producerLoop() {
     while (producerRunning_.load(std::memory_order_acquire)) {
         size_t freeSpace = masterBus_.freeFrames();
         if (freeSpace >= CHUNK_SIZE) {
-            toneGen_.generateFrames(reinterpret_cast<uint8_t*>(chunk.data()), CHUNK_SIZE, busFormat);
+            if (isPulseMode_) {
+                pulseGen_.generateFrames(chunk.data(), CHUNK_SIZE, busFormat.channels);
+            } else {
+                toneGen_.generateFrames(reinterpret_cast<uint8_t*>(chunk.data()), CHUNK_SIZE, busFormat);
+            }
             masterBus_.write(chunk.data(), CHUNK_SIZE);
             router_.dispatch(masterBus_);
         }
@@ -102,6 +106,56 @@ bool AudioEngine::startTone(const std::vector<AudioDevice>& devices, const ToneP
     }
 
     // Launch background producer thread feeding MasterAudioBus
+    producerRunning_.store(true, std::memory_order_release);
+    producerThread_ = std::thread(&AudioEngine::producerLoop, this);
+
+    return true;
+}
+
+bool AudioEngine::startPulse(const std::vector<std::string>& deviceIds, const PulseParameters& params) {
+    std::vector<AudioDevice> devices;
+    devices.reserve(deviceIds.size());
+    for (const auto& id : deviceIds) {
+        AudioDevice dev;
+        dev.id = id;
+        dev.name = id.empty() ? "Default Audio Endpoint" : ("Device " + id);
+        dev.isActive = true;
+        devices.push_back(dev);
+    }
+    return startPulse(devices, params);
+}
+
+bool AudioEngine::startPulse(const std::vector<AudioDevice>& devices, const PulseParameters& params) {
+    stop();
+    isCaptureMode_ = false;
+    isPulseMode_ = true;
+
+    if (devices.empty()) {
+        return false;
+    }
+
+    pulseGen_ = SyncPulseGenerator(params);
+    pulseGen_.reset();
+
+    const auto masterFmt = MasterAudioBus::canonicalFormat();
+    masterBus_.initialize(masterFmt, masterFmt.sampleRate);
+    masterBus_.reset();
+
+    router_.clearOutputs();
+    for (const auto& dev : devices) {
+        router_.addOutput(dev);
+    }
+
+    if (!router_.initializeOutputs(masterFmt.sampleRate, masterFmt.channels)) {
+        router_.closeOutputs();
+        return false;
+    }
+
+    if (!router_.startOutputs()) {
+        stop();
+        return false;
+    }
+
     producerRunning_.store(true, std::memory_order_release);
     producerThread_ = std::thread(&AudioEngine::producerLoop, this);
 
@@ -219,10 +273,15 @@ void AudioEngine::stop() {
 
     masterBus_.reset();
     isCaptureMode_ = false;
+    isPulseMode_ = false;
 }
 
 bool AudioEngine::isRunning() const {
     return router_.anyRunning() || (capture_ && capture_->state() == CaptureState::Running);
+}
+
+std::vector<PairwiseDriftEstimate> AudioEngine::getPairwiseDriftEstimatesOverWindow(double windowSec) const {
+    return router_.getPairwiseDriftEstimatesOverWindow(windowSec);
 }
 
 EngineDiagnostics AudioEngine::getDiagnostics() const {
@@ -234,6 +293,9 @@ EngineDiagnostics AudioEngine::getDiagnostics() const {
     diag.outputs = router_.getOutputTelemetry();
     diag.pairwiseDrift = router_.getPairwiseDriftEstimates();
     diag.routerFramesDistributed = router_.totalFramesDistributed();
+    diag.isPulseMode = isPulseMode_;
+    diag.isPulseComplete = pulseGen_.isComplete();
+    diag.pulseMasterFrameIndex = pulseGen_.pulseMasterFrameIndex();
 
     // Populate primary output fields for backwards compatibility
     if (!diag.outputs.empty()) {

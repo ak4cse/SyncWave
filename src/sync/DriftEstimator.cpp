@@ -1,4 +1,4 @@
-﻿#include "DriftEstimator.h"
+#include "DriftEstimator.h"
 #include <algorithm>
 #include <cmath>
 
@@ -20,9 +20,33 @@ double DriftEstimator::calculateRelativePpm(double rateA, double nominalA, doubl
     return ((normA / normB) - 1.0) * 1e6;
 }
 
+double DriftEstimator::calculateOffset(double posSecA, double posSecB) {
+    return posSecA - posSecB;
+}
+
+double DriftEstimator::calculateAccumulatedDrift(double initialOffsetSec, double finalOffsetSec) {
+    return finalOffsetSec - initialOffsetSec;
+}
+
+double DriftEstimator::calculateDriftRateFromDelta(double deltaOffsetSec, double elapsedSec) {
+    if (elapsedSec <= 0.0) {
+        return 0.0;
+    }
+    return (deltaOffsetSec / elapsedSec) * 1e6;
+}
+
 PairwiseDriftEstimate DriftEstimator::estimate(
     const DeviceClock& clockA,
     const DeviceClock& clockB,
+    const std::string& nameA,
+    const std::string& nameB) {
+    return estimateOverWindow(clockA, clockB, 0.0, nameA, nameB);
+}
+
+PairwiseDriftEstimate DriftEstimator::estimateOverWindow(
+    const DeviceClock& clockA,
+    const DeviceClock& clockB,
+    double windowSec,
     const std::string& nameA,
     const std::string& nameB) {
 
@@ -33,11 +57,13 @@ PairwiseDriftEstimate DriftEstimator::estimate(
     result.deviceNameB = nameB.empty() ? clockB.deviceId() : nameB;
     result.nominalRateA = clockA.nominalSampleRate();
     result.nominalRateB = clockB.nominalSampleRate();
-    result.sampleCountA = clockA.sampleCount();
-    result.sampleCountB = clockB.sampleCount();
+    result.windowRequestedSec = windowSec;
 
-    const auto estA = clockA.estimateRate();
-    const auto estB = clockB.estimateRate();
+    const auto estA = clockA.estimateRateOverWindow(windowSec);
+    const auto estB = clockB.estimateRateOverWindow(windowSec);
+
+    result.sampleCountA = estA.sampleCount;
+    result.sampleCountB = estB.sampleCount;
 
     if (!estA.isValid || !estB.isValid) {
         result.isValid = false;
@@ -47,23 +73,34 @@ PairwiseDriftEstimate DriftEstimator::estimate(
     result.estimatedRateA = estA.estimatedRate;
     result.estimatedRateB = estB.estimatedRate;
     result.measurementDurationSec = std::min(estA.measurementDurationSec, estB.measurementDurationSec);
+    result.confidence = estA.rSquared * estB.rSquared;
 
     const double normA = (result.nominalRateA > 0) ? (estA.estimatedRate / result.nominalRateA) : 1.0;
     const double normB = (result.nominalRateB > 0) ? (estB.estimatedRate / result.nominalRateB) : 1.0;
 
     if (normB > 1e-9) {
         result.rateRatio = normA / normB;
-        result.relativeDriftPpm = (result.rateRatio - 1.0) * 1e6;
+        result.driftRatePpm = (result.rateRatio - 1.0) * 1e6;
     } else {
         result.rateRatio = 1.0;
-        result.relativeDriftPpm = 0.0;
+        result.driftRatePpm = 0.0;
     }
+    result.relativeDriftPpm = result.driftRatePpm;
 
-    // Calculate current relative playhead offset (seconds)
+    // Calculate instantaneous playhead offset (seconds)
     const auto latestA = clockA.latestSample();
     const auto latestB = clockB.latestSample();
     if (latestA && latestB) {
-        result.relativeOffsetSec = latestA->positionSeconds() - latestB->positionSeconds();
+        result.instantaneousOffsetSec = calculateOffset(latestA->positionSeconds(), latestB->positionSeconds());
+        result.relativeOffsetSec = result.instantaneousOffsetSec;
+    }
+
+    // Calculate initial playhead offset and accumulated drift across the history / window
+    const auto firstA = clockA.firstSample();
+    const auto firstB = clockB.firstSample();
+    if (firstA && firstB) {
+        result.initialOffsetSec = calculateOffset(firstA->positionSeconds(), firstB->positionSeconds());
+        result.accumulatedDriftSec = calculateAccumulatedDrift(result.initialOffsetSec, result.instantaneousOffsetSec);
     }
 
     result.isValid = true;

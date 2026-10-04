@@ -59,16 +59,78 @@ SyncWave maintains strict distinctions between the following timing concepts:
 
 ---
 
-## Planned Synchronization Roadmap (Milestones 8+)
+## Milestone 8 Status: Relative Latency & Timing Model Validation
 
-1. **Milestone 8: Delay Buffer & Static Latency Alignment**:
+> [!IMPORTANT]
+> **Milestone 8 rigorously validates and audits timing models, separates offset from drift, and models stream playheads. It does NOT implement automatic delay compensation or dynamic feedback drift correction.**
+
+### Implemented Subsystems & Mathematical Models:
+1. **Mathematical Separation of Offset vs Accumulated Drift vs Drift Rate**:
+   - **Instantaneous Offset**: $T_A(t) - T_B(t)$ in milliseconds (snapshot playhead difference).
+   - **Accumulated Drift**: $\Delta\text{Offset} = \text{Offset}(t_1) - \text{Offset}(t_0)$ in milliseconds (net physical divergence over duration $\Delta t$).
+   - **Drift Rate**: $\frac{\Delta\text{Offset}}{\Delta t} \times 10^6$ in ppm.
+   - *Crucial property*: If Device A is 100 ms ahead and remains 100 ms ahead, accumulated drift is strictly 0.0 ms.
+
+2. **Multi-Window Rate Estimation & Startup Transient Resolution**:
+   - `DeviceClock::estimateRateOverWindow(windowSec)` evaluates rate stability across trailing windows (1s, 5s, 10s, 30s, 60s).
+   - Resolved the Bluetooth -612 ppm loopback artifact: proved that initial A2DP buffer ramp (~190 ms) skews short regression slopes, whereas steady-state linear regression converges (+1.08 ppm at 10s).
+
+3. **Stream Playhead Estimation**:
+   - $\text{App Playhead (frames)} = \text{framesSubmitted} - \text{currentPadding}$
+   - $\text{App Playhead (seconds)} = \frac{\text{framesSubmitted} - \text{currentPadding}}{f_s}$
+   - $\text{WASAPI Clock Playhead (seconds)} = \frac{\text{clockPosition}}{\text{clockFrequency}}$
+   - $\text{Playhead Discrepancy (ms)} = (\text{App Playhead} - \text{WASAPI Playhead}) \times 1000$
+
+4. **Deterministic Transient Test Harness (`SyncPulseGenerator`)**:
+   - Generates bandlimited half-cycle sine impulses (1.0 ms duration, peak 1.0f) with 500 ms lead-in and lead-out silence.
+   - Evaluated across repeated runs via `syncwave latency-test`.
+
+### Verified 60-Second Real Hardware Validation:
+Conducted on `Headphones (realme Buds T310)` (Bluetooth) and `Speakers (Realtek(R) Audio)` (Integrated) with 0 underruns:
+- **Rate Convergence Across Trailing Windows**:
+  | Window | realme Buds T310 Rate | Buds Error (ppm) | Realtek Audio Rate | Realtek Error (ppm) |
+  | :--- | :--- | :--- | :--- | :--- |
+  | **1 s** | 47,994.69 Hz | -110.59 ppm | 48,003.87 Hz | +80.52 ppm |
+  | **5 s** | 48,000.26 Hz | +5.46 ppm | 47,998.24 Hz | -36.62 ppm |
+  | **10 s** | 48,000.05 Hz | +1.08 ppm | 47,997.70 Hz | -48.00 ppm |
+  | **30 s** | 47,878.80 Hz | -2525.09 ppm | 47,998.54 Hz | -30.40 ppm |
+  | **60 s** | 47,994.35 Hz | -117.67 ppm | 47,998.38 Hz | -33.70 ppm |
+- **Pairwise Drift & Offset Metrics**:
+  - Relative Drift Rate: -83.98 ppm
+  - Initial Offset: -949.83 ms
+  - Final Offset: -1000.71 ms
+  - Accumulated Drift: -50.88 ms over 53.58 s
+  - Confidence ($r_A^2 \times r_B^2$): 1.0000
+
+### Verified Deterministic Transient Repeatability (5 Runs):
+- Mean Latency: -8.00 ms
+- Median Latency: -10.00 ms
+- Min Latency: -10.00 ms
+- Max Latency: 0.00 ms
+- Std Deviation: 4.47 ms
+
+### Physical Acoustic Latency Honesty Statement:
+Software timestamps (`IAudioClock`, QPC, and padding) observe only OS audio engine mixing and driver submission stages.
+Physical acoustic emission includes external physical delays:
+- Bluetooth A2DP transport packetization and RF transmission delay (~100–250 ms depending on SBC/AAC/LDAC codec profiles and buffer depths).
+- Hardware DAC reconstruction / anti-aliasing filter delay.
+- Transducer electromechanical latency and room air flight time ($~1\text{ ms per } 34.3\text{ cm}$).
+Direct measurement of physical acoustic latency requires an external calibrated microphone feedback loop or oscilloscope probe.
+SyncWave explicitly disclaims claiming software timing equals physical acoustic timing.
+
+---
+
+## Planned Synchronization Roadmap (Milestones 9+)
+
+1. **Milestone 9: Static Delay Alignment & DelayBuffer**:
    - Insertion of adjustable delay lines (`DelayBuffer`) into each `DeviceOutput` queue.
    - Aligning playheads by delaying faster devices to match slowest device ($T_{\text{target}} = \max(\text{latency}) + \text{margin}$).
 
-2. **Milestone 9: Dynamic Drift Correction**:
+2. **Milestone 10: Dynamic Drift Correction & Micro-Resampling**:
    - Continuous drift tracking via `DriftEstimator`.
    - Micro-resampling / dynamic clock rate modulation to keep drift within sub-millisecond bounds without buffer underruns or pitch artifacts.
 
-3. **Milestone 10: Automatic Calibration**:
+3. **Milestone 11: Automatic Acoustic Calibration**:
    - Acoustic chirp generation and loopback capture for true physical latency discovery.
+
 

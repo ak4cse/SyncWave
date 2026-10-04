@@ -59,9 +59,18 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Pairwise relative drift estimation (`DriftEstimator`) computing rate ratios, relative drift ($ppm$), and playhead offset ($ms$).
   - Non-intrusive 10 Hz out-of-band sampling maintaining zero contention and real-time safety on WASAPI render threads.
   - Physical acoustic latency vs software latency domain distinction.
-- [ ] **Milestone 8 — DelayBuffer & Static Delay Alignment**
-- [ ] **Milestone 9 — Dynamic Drift Correction**
-- [ ] **Milestone 10 — Automatic Calibration**
+- [x] **Milestone 8 — Relative Latency & Timing Model Validation**
+  - Multi-window clock convergence analysis (`DeviceClock::estimateRateOverWindow`) resolving the Bluetooth startup ramp artifact.
+  - Mathematical separation of instantaneous offset ($T_A - T_B$) from accumulated drift ($\Delta\text{Offset}$) and drift rate ($ppm$).
+  - End-to-end stream playhead estimation (`estimatedAppPlayheadFrames/Sec`, `wasapiClockPlayheadSec`, `playheadDiscrepancyMs`).
+  - Deterministic transient pulse generator (`SyncPulseGenerator`) for repeatable software latency evaluation.
+  - High-precision 60s clock experiment: `syncwave clock-test --outputs 2,3 --duration 60`
+  - Deterministic transient latency experiment: `syncwave latency-test --outputs 2,3 --runs 5`
+  - Honest physical acoustic latency assessment distinguishing software driver latency from physical acoustic emission.
+  - Expanded test suite: 422 passing automated unit and integration tests.
+- [ ] **Milestone 9 — DelayBuffer & Static Delay Alignment**
+- [ ] **Milestone 10 — Dynamic Drift Correction**
+- [ ] **Milestone 11 — Automatic Calibration**
 
 ---
 
@@ -138,6 +147,18 @@ cmake --build build --config Release
 
 # Play continuous tone across multiple endpoints until Ctrl+C
 .\build\syncwave.exe tone --outputs 2,3 --duration 0
+```
+
+### High-Precision 60-Second Clock Stability Experiment
+```powershell
+# Run continuous 60s experiment with multi-window convergence table (1s, 5s, 10s, 30s, 60s)
+.\build\syncwave.exe clock-test --outputs 2,3 --duration 60
+```
+
+### Deterministic Transient & Relative Latency Experiment
+```powershell
+# Run 5 repeated impulse runs to evaluate software-path latency repeatability
+.\build\syncwave.exe latency-test --outputs 2,3 --runs 5
 ```
 
 ### Check Status & Telemetry
