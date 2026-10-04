@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SyncWave VERSION 0.9.0 LANGUAGES CXX)
+project(SyncWave VERSION 0.10.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -55,6 +55,9 @@ add_library(syncwave_core STATIC
     src/sync/OutputLatencyModel.h
     src/sync/DelayBuffer.h
     src/sync/DelayBuffer.cpp
+    src/sync/SyncError.h
+    src/sync/FilteredDriftEstimator.h
+    src/sync/FilteredDriftEstimator.cpp
     src/sync/SyncController.h
     src/sync/SyncController.cpp
     src/dsp/Resampler.h

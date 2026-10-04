@@ -81,18 +81,29 @@ public:
     void setSyncStateAll(SyncState state);
     void applySyncPlan(const SyncPlan& plan);
 
+    // Micro-resampling drift correction methods
+    void setDriftCorrectionEnabled(bool enable);
+    [[nodiscard]] bool isDriftCorrectionEnabled() const;
+    void updateDriftCorrection();
+    void setTargetLatencyMs(double targetLatencyMs);
+    [[nodiscard]] double targetLatencyMs() const;
+
     [[nodiscard]] bool allRunning() const;
     [[nodiscard]] bool anyRunning() const;
     [[nodiscard]] uint64_t totalFramesDistributed() const;
     [[nodiscard]] std::vector<DeviceOutputTelemetry> getOutputTelemetry() const;
 
 private:
+    void updateDriftCorrectionLocked();
+
     mutable std::mutex outputMutex_;
     std::vector<std::unique_ptr<DeviceOutput>> outputs_;
     std::atomic<uint64_t> totalFramesDistributed_{0};
     std::vector<float> scratchDispatchBuffer_;
     uint32_t masterSampleRate_ = 48000;
     uint32_t masterChannels_ = 2;
+    std::atomic<bool> driftCorrectionEnabled_{false};
+    double targetLatencyMs_ = 0.0;
 };
 
 } // namespace syncwave

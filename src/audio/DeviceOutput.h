@@ -8,9 +8,13 @@
 #include "../sync/DeviceClock.h"
 #include "../sync/DelayBuffer.h"
 #include "../sync/OutputLatencyModel.h"
+#include "../sync/SyncError.h"
+#include "../sync/FilteredDriftEstimator.h"
+#include "../sync/SyncController.h"
 #include <string>
 #include <memory>
 #include <atomic>
+#include <mutex>
 #include <utility>
 
 namespace syncwave {
@@ -48,6 +52,15 @@ struct DeviceOutputTelemetry {
     OutputLatencyModel latencyModel;
     double configuredDelayMs = 0.0;
     size_t appliedDelayFrames = 0;
+    double targetRateAdjustmentPpm = 0.0;
+    double currentRateAdjustmentPpm = 0.0;
+    DriftCorrectionState driftState = DriftCorrectionState::Disabled;
+    SyncError syncError;
+    double rawDriftPpm = 0.0;
+    double filteredDriftPpm = 0.0;
+    double phaseErrorMs = 0.0;
+    double filteredPhaseErrorMs = 0.0;
+    double driftConfidence = 0.0;
     SyncState syncState = SyncState::Disabled;
     bool isAvailable = true;
 };
@@ -86,11 +99,12 @@ public:
     [[nodiscard]] OutputState state() const;
     [[nodiscard]] AudioFormat format() const;
     [[nodiscard]] bool isAvailable() const { return isAvailable_.load(std::memory_order_relaxed); }
-    void markUnavailable() { isAvailable_.store(false, std::memory_order_release); }
+    void markUnavailable();
 
     [[nodiscard]] RingBuffer* queue() { return queue_.get(); }
     [[nodiscard]] const RingBuffer* queue() const { return queue_.get(); }
     [[nodiscard]] Resampler* resampler() { return resampler_.get(); }
+    [[nodiscard]] const Resampler* resampler() const { return resampler_.get(); }
 
     // Sample WASAPI clock, stream latency, and padding into DeviceClock
     DeviceClockSample sampleClock(std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now());
@@ -118,6 +132,23 @@ public:
     void setSyncState(SyncState state);
     [[nodiscard]] SyncState syncState() const;
 
+    // Micro-resampling rate adjustment methods
+    void setRateAdjustmentPpm(double ppm, bool immediate = false);
+    [[nodiscard]] double rateAdjustmentPpm() const;
+    [[nodiscard]] double currentRateAdjustmentPpm() const;
+    [[nodiscard]] bool hasRateAdjustment() const;
+
+    // Drift controller methods
+    void setDriftCorrectionEnabled(bool enabled);
+    [[nodiscard]] bool isDriftCorrectionEnabled() const;
+    void setDriftControllerConfig(const DriftControllerConfig& config);
+    [[nodiscard]] const DriftControllerConfig& driftControllerConfig() const;
+    [[nodiscard]] DriftCorrectionState driftCorrectionState() const;
+    [[nodiscard]] SyncError latestSyncError() const;
+    [[nodiscard]] DriftCorrectionOutput latestDriftCorrection() const;
+    void resetDriftCorrection();
+    void updateDriftCorrection(double masterTimelineSec, uint64_t masterTimelineFrames, double targetLatencySec = -1.0);
+
     [[nodiscard]] OutputLatencyModel getLatencyModel() const;
     [[nodiscard]] DelayBuffer* delayBuffer() { return delayBuffer_.get(); }
     [[nodiscard]] const DelayBuffer* delayBuffer() const { return delayBuffer_.get(); }
@@ -135,6 +166,12 @@ private:
     std::unique_ptr<Resampler> resampler_;
     std::unique_ptr<DelayBuffer> delayBuffer_;
     DeviceClock clock_;
+
+    FilteredDriftEstimator driftEstimator_;
+    DriftController driftController_;
+    mutable std::mutex syncErrorMutex_;
+    SyncError latestSyncError_;
+    DriftCorrectionOutput latestCorrection_;
 
     std::vector<float> renderScratch_; // Preallocated buffer to eliminate allocations in render callback
     std::atomic<double> calibrationOffsetMs_{0.0};

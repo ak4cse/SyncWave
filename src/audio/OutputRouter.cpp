@@ -11,21 +11,17 @@ OutputRouter::~OutputRouter() {
 
 bool OutputRouter::addOutput(const AudioDevice& device) {
     std::lock_guard<std::mutex> lock(outputMutex_);
-
-    // Prevent duplicate device addition
     for (const auto& out : outputs_) {
         if (out->deviceId() == device.id) {
-            return false;
+            return false; // Already present
         }
     }
-
     outputs_.push_back(std::make_unique<DeviceOutput>(device));
     return true;
 }
 
 bool OutputRouter::removeOutput(const std::string& deviceId) {
     std::lock_guard<std::mutex> lock(outputMutex_);
-
     auto it = std::find_if(outputs_.begin(), outputs_.end(), [&](const std::unique_ptr<DeviceOutput>& out) {
         return out->deviceId() == deviceId;
     });
@@ -45,6 +41,8 @@ void OutputRouter::clearOutputs() {
         out->close();
     }
     outputs_.clear();
+    totalFramesDistributed_.store(0, std::memory_order_relaxed);
+    targetLatencyMs_ = 0.0;
 }
 
 size_t OutputRouter::outputCount() const {
@@ -86,6 +84,9 @@ bool OutputRouter::initializeOutputs(uint32_t masterSampleRate, uint32_t masterC
     for (auto& out : outputs_) {
         if (out->initialize(masterSampleRate_, masterChannels_)) {
             anyInitialized = true;
+            if (driftCorrectionEnabled_.load(std::memory_order_acquire)) {
+                out->setDriftCorrectionEnabled(true);
+            }
         }
     }
 
@@ -110,6 +111,9 @@ bool OutputRouter::initializeOutputsForTesting(uint32_t masterSampleRate, uint32
             devRate = deviceSampleRates[i];
         }
         outputs_[i]->initializeForTesting(masterSampleRate_, masterChannels_, devRate);
+        if (driftCorrectionEnabled_.load(std::memory_order_acquire)) {
+            outputs_[i]->setDriftCorrectionEnabled(true);
+        }
     }
 
     return true;
@@ -235,6 +239,7 @@ void OutputRouter::sampleAllClocks(std::chrono::steady_clock::time_point timesta
             out->sampleClock(timestamp);
         }
     }
+    updateDriftCorrectionLocked();
 }
 
 std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimates() const {
@@ -253,13 +258,21 @@ std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimatesOverWi
         for (size_t j = i + 1; j < outputs_.size(); ++j) {
             const auto& outA = outputs_[i];
             const auto& outB = outputs_[j];
-            if (outA->isAvailable() && outB->isAvailable()) {
-                auto estimate = DriftEstimator::estimateOverWindow(
-                    outA->clock(), outB->clock(), windowSec,
-                    outA->deviceName(), outB->deviceName()
-                );
-                results.push_back(estimate);
+
+            if (!outA->isAvailable() || !outB->isAvailable()) {
+                continue;
             }
+
+            PairwiseDriftEstimate est = (windowSec > 0.0)
+                ? DriftEstimator::estimateOverWindow(outA->clock(), outB->clock(), windowSec)
+                : DriftEstimator::estimate(outA->clock(), outB->clock());
+
+            est.deviceIdA = outA->deviceId();
+            est.deviceNameA = outA->deviceName();
+            est.deviceIdB = outB->deviceId();
+            est.deviceNameB = outB->deviceName();
+
+            results.push_back(est);
         }
     }
 
@@ -271,9 +284,7 @@ std::vector<OutputLatencyModel> OutputRouter::getLatencyModels() const {
     std::vector<OutputLatencyModel> models;
     models.reserve(outputs_.size());
     for (const auto& out : outputs_) {
-        if (out) {
-            models.push_back(out->getLatencyModel());
-        }
+        models.push_back(out->getLatencyModel());
     }
     return models;
 }
@@ -310,12 +321,61 @@ void OutputRouter::setSyncStateAll(SyncState state) {
 
 void OutputRouter::applySyncPlan(const SyncPlan& plan) {
     std::lock_guard<std::mutex> lock(outputMutex_);
+    if (plan.isValid) {
+        targetLatencyMs_ = plan.targetLatencyMs;
+    }
     for (size_t i = 0; i < outputs_.size(); ++i) {
         if (!outputs_[i]) continue;
         if (i < plan.calculatedDelaysMs.size()) {
             outputs_[i]->setDelayMs(plan.calculatedDelaysMs[i]);
         }
         outputs_[i]->setSyncState(plan.syncState);
+    }
+}
+
+void OutputRouter::setDriftCorrectionEnabled(bool enable) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    driftCorrectionEnabled_.store(enable, std::memory_order_release);
+    for (auto& out : outputs_) {
+        if (out) {
+            out->setDriftCorrectionEnabled(enable);
+        }
+    }
+}
+
+bool OutputRouter::isDriftCorrectionEnabled() const {
+    return driftCorrectionEnabled_.load(std::memory_order_acquire);
+}
+
+void OutputRouter::updateDriftCorrection() {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    updateDriftCorrectionLocked();
+}
+
+void OutputRouter::setTargetLatencyMs(double targetLatencyMs) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    targetLatencyMs_ = targetLatencyMs;
+}
+
+double OutputRouter::targetLatencyMs() const {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    return targetLatencyMs_;
+}
+
+void OutputRouter::updateDriftCorrectionLocked() {
+    uint64_t totalFrames = totalFramesDistributed_.load(std::memory_order_relaxed);
+    double masterTimelineSec = (masterSampleRate_ > 0)
+        ? (static_cast<double>(totalFrames) / static_cast<double>(masterSampleRate_))
+        : 0.0;
+
+    double targetLatencySec = (targetLatencyMs_ > 0.0)
+        ? (targetLatencyMs_ / 1000.0)
+        : -1.0;
+
+    for (auto& out : outputs_) {
+        if (out && out->isAvailable()) {
+            out->updateDriftCorrection(masterTimelineSec, totalFrames, targetLatencySec);
+        }
     }
 }
 

@@ -15,7 +15,11 @@ void Resampler::reset(uint32_t inSampleRate, uint32_t outSampleRate, uint32_t ch
     inRate_ = (inSampleRate > 0) ? inSampleRate : 48000;
     outRate_ = (outSampleRate > 0) ? outSampleRate : 48000;
     channels_ = (channels > 0) ? channels : 2;
-    ratio_ = static_cast<double>(inRate_) / static_cast<double>(outRate_);
+    baseRatio_ = static_cast<double>(inRate_) / static_cast<double>(outRate_);
+    targetAdjustmentPpm_.store(0.0, std::memory_order_relaxed);
+    currentAdjustmentPpm_ = 0.0;
+    ratio_ = baseRatio_;
+    maxSlewPpmPerFrame_ = (outRate_ > 0) ? (slewRatePpmPerSec_ / outRate_) : (5.0 / 48000.0);
 
     lastSample_.assign(channels_, 0.0f);
     hasLastSample_ = false;
@@ -39,6 +43,21 @@ void Resampler::resetState() {
     fifoReadIndex_ = 0;
     fifoWriteIndex_ = 0;
     fifoCount_ = 0;
+    currentAdjustmentPpm_ = 0.0;
+    ratio_ = baseRatio_;
+}
+
+void Resampler::setRateAdjustmentPpm(double ppm, bool immediate) {
+    targetAdjustmentPpm_.store(ppm, std::memory_order_relaxed);
+    if (immediate) {
+        currentAdjustmentPpm_ = ppm;
+        ratio_ = baseRatio_ * (1.0 + currentAdjustmentPpm_ / 1'000'000.0);
+    }
+}
+
+void Resampler::setSlewRatePpmPerSecond(double slewRatePpmPerSec) {
+    slewRatePpmPerSec_ = (slewRatePpmPerSec > 0.0) ? slewRatePpmPerSec : 5.0;
+    maxSlewPpmPerFrame_ = (outRate_ > 0) ? (slewRatePpmPerSec_ / outRate_) : (5.0 / 48000.0);
 }
 
 size_t Resampler::process(const float* inBuffer, size_t inFrames, float* outBuffer, size_t maxOutFrames) {
@@ -46,7 +65,9 @@ size_t Resampler::process(const float* inBuffer, size_t inFrames, float* outBuff
         return 0;
     }
 
-    if (inRate_ == outRate_) {
+    double targetPpm = targetAdjustmentPpm_.load(std::memory_order_relaxed);
+
+    if (inRate_ == outRate_ && targetPpm == 0.0 && currentAdjustmentPpm_ == 0.0) {
         size_t framesToCopy = std::min(inFrames, maxOutFrames);
         std::memcpy(outBuffer, inBuffer, framesToCopy * channels_ * sizeof(float));
         return framesToCopy;
@@ -57,6 +78,17 @@ size_t Resampler::process(const float* inBuffer, size_t inFrames, float* outBuff
     size_t outIdx = 0;
 
     while (outIdx < maxOutFrames) {
+        // Slew current adjustment towards target adjustment per output frame
+        double diff = targetPpm - currentAdjustmentPpm_;
+        if (std::abs(diff) <= maxSlewPpmPerFrame_) {
+            currentAdjustmentPpm_ = targetPpm;
+        } else if (diff > 0.0) {
+            currentAdjustmentPpm_ += maxSlewPpmPerFrame_;
+        } else {
+            currentAdjustmentPpm_ -= maxSlewPpmPerFrame_;
+        }
+        ratio_ = baseRatio_ * (1.0 + currentAdjustmentPpm_ / 1'000'000.0);
+
         if (pos < 0.0) {
             // Interpolate between lastSample_ (at t = -1) and inBuffer[0] (at t = 0)
             const float alpha = static_cast<float>(pos + 1.0);
@@ -143,7 +175,7 @@ size_t Resampler::pull(RingBuffer& queue, float* outBuffer, size_t outFrames) {
         return 0;
     }
 
-    if (inRate_ == outRate_) {
+    if (inRate_ == outRate_ && !hasRateAdjustment()) {
         return queue.read(outBuffer, outFrames);
     }
 
@@ -170,7 +202,7 @@ size_t Resampler::pull(MasterAudioBus& bus, float* outBuffer, size_t outFrames) 
         return 0;
     }
 
-    if (inRate_ == outRate_) {
+    if (inRate_ == outRate_ && !hasRateAdjustment()) {
         return bus.read(outBuffer, outFrames);
     }
 

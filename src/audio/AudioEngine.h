@@ -106,6 +106,10 @@ public:
     [[nodiscard]] const SyncController& syncController() const { return syncController_; }
     [[nodiscard]] const SyncPlan& activeSyncPlan() const { return activeSyncPlan_; }
 
+    // Micro-resampling drift correction
+    void enableDriftCorrection(bool enable = true);
+    [[nodiscard]] bool isDriftCorrectionEnabled() const;
+
     [[nodiscard]] bool isRunning() const;
     [[nodiscard]] EngineDiagnostics getDiagnostics() const;
     [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimatesOverWindow(double windowSec) const;
@@ -128,6 +132,7 @@ private:
     std::vector<double> pendingManualDelays_;
     std::vector<double> pendingCalibrationOffsets_;
     bool autoSyncRequested_ = false;
+    bool driftCorrectionRequested_ = false;
     SyncPlan activeSyncPlan_{};
 
     std::thread producerThread_;

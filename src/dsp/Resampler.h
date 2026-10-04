@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <atomic>
 
 namespace syncwave {
 
@@ -34,13 +35,34 @@ public:
     [[nodiscard]] uint32_t outSampleRate() const { return outRate_; }
     [[nodiscard]] uint32_t channels() const { return channels_; }
     [[nodiscard]] double ratio() const { return ratio_; }
+    [[nodiscard]] double baseRatio() const { return baseRatio_; }
+    [[nodiscard]] double targetRateAdjustmentPpm() const { return targetAdjustmentPpm_.load(std::memory_order_relaxed); }
+    [[nodiscard]] double currentRateAdjustmentPpm() const { return currentAdjustmentPpm_; }
+    [[nodiscard]] bool hasRateAdjustment() const {
+        return (targetAdjustmentPpm_.load(std::memory_order_relaxed) != 0.0) || (currentAdjustmentPpm_ != 0.0);
+    }
+    [[nodiscard]] size_t fifoCount() const { return fifoCount_; }
+
+    // Configure rate adjustment in parts-per-million (PPM).
+    // If immediate is true, slewing is bypassed and applied instantly (useful for testing).
+    void setRateAdjustmentPpm(double ppm, bool immediate = false);
+
+    // Configure maximum slew rate in PPM per second (default: 5.0 ppm/s)
+    void setSlewRatePpmPerSecond(double slewRatePpmPerSec);
+    [[nodiscard]] double slewRatePpmPerSecond() const { return slewRatePpmPerSec_; }
 
 private:
     uint32_t inRate_ = 48000;
     uint32_t outRate_ = 48000;
     uint32_t channels_ = 2;
-    double ratio_ = 1.0;     // inRate / outRate
+    double baseRatio_ = 1.0; // inRate / outRate
+    double ratio_ = 1.0;     // effective ratio incorporating rate adjustment
     double phase_ = 0.0;     // fractional phase in [0, 1)
+
+    std::atomic<double> targetAdjustmentPpm_{0.0};
+    double currentAdjustmentPpm_ = 0.0;
+    double slewRatePpmPerSec_ = 5.0; // 5 ppm/s max rate of change
+    double maxSlewPpmPerFrame_ = 5.0 / 48000.0;
 
     std::vector<float> lastSample_; // channels_ samples from previous input block
     bool hasLastSample_ = false;

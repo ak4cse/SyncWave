@@ -84,7 +84,7 @@ void CommandInterface::printHelp() const {
               << "  --output, -o <index|id>                    Output endpoint (can be repeated for multiple outputs)\n"
               << "  --outputs, -O <id1,id2,...>                Comma-separated list of output endpoints\n"
               << "  --delay <ms1,ms2,...|ms>                   Per-output or default delay in milliseconds\n"
-              << "  --sync <none|software>                     Automatic software latency alignment mode\n"
+              << "  --sync <none|software|adaptive>            Alignment mode (none, software, or adaptive drift correction)\n"
               << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n"
               << "  --duration, -t <sec>                       Duration in seconds (0 = continuous, default: 5s)\n\n"
               << "Options for 'tone':\n"
@@ -92,7 +92,7 @@ void CommandInterface::printHelp() const {
               << "  --outputs, -O <id1,id2,...>                Comma-separated list of target output endpoints\n"
               << "  --frequency, -f <Hz>                       Tone frequency in Hz (default: 440 Hz)\n"
               << "  --delay <ms1,ms2,...|ms>                   Per-output or default delay in milliseconds\n"
-              << "  --sync <none|software>                     Automatic software latency alignment mode\n"
+              << "  --sync <none|software|adaptive>            Alignment mode (none, software, or adaptive drift correction)\n"
               << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n"
               << "  --duration, -t <sec>                       Playback duration in seconds (0 = continuous, default: 5s)\n"
               << "  --volume, -v <0.0..1.0>                    Volume amplitude level (default: 0.25)\n\n"
@@ -105,7 +105,7 @@ void CommandInterface::printHelp() const {
               << "Options for 'latency-test':\n"
               << "  --outputs, -O <id1,id2,...>                Target output endpoints (default: first two active endpoints)\n"
               << "  --delay <ms1,ms2,...|ms>                   Per-output or default delay in milliseconds\n"
-              << "  --sync <none|software>                     Automatic software latency alignment mode\n"
+              << "  --sync <none|software|adaptive>            Alignment mode (none, software, or adaptive drift correction)\n"
               << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n"
               << "  --runs, -n <count>                         Number of repeated test runs (default: 5)\n\n";
 }
@@ -310,6 +310,16 @@ static void printOutputTelemetry(const std::vector<DeviceOutputTelemetry>& outpu
         }
         std::cout << "      Est. SW latency:  " << out.latencyModel.estimatedSoftwareLatencyMs << " ms\n";
         std::cout << "      Effective latency:" << out.latencyModel.effectiveLatencyMs << " ms\n";
+        if (out.driftState != DriftCorrectionState::Disabled) {
+            std::cout << "      Drift state:      " << driftCorrectionStateToString(out.driftState) << "\n";
+            std::cout << "      Phase error:      " << (out.phaseErrorMs >= 0.0 ? "+" : "") << out.phaseErrorMs << " ms"
+                      << " (filtered: " << (out.filteredPhaseErrorMs >= 0.0 ? "+" : "") << out.filteredPhaseErrorMs << " ms)\n";
+            std::cout << "      Drift error:      " << (out.rawDriftPpm >= 0.0 ? "+" : "") << out.rawDriftPpm << " ppm"
+                      << " (filtered: " << (out.filteredDriftPpm >= 0.0 ? "+" : "") << out.filteredDriftPpm << " ppm)\n";
+            std::cout << "      Drift confidence: " << std::fixed << std::setprecision(1) << (out.driftConfidence * 100.0) << "%\n";
+            std::cout << "      Target rate adj:  " << (out.targetRateAdjustmentPpm >= 0.0 ? "+" : "") << out.targetRateAdjustmentPpm << " ppm\n";
+            std::cout << "      Active rate adj:  " << (out.currentRateAdjustmentPpm >= 0.0 ? "+" : "") << out.currentRateAdjustmentPpm << " ppm\n";
+        }
         std::cout << "\n";
     }
 
@@ -446,10 +456,17 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
         audioEngine_->setCalibrationOffsets(offsets);
     }
     if (!syncMode.empty()) {
-        if (syncMode == "software" || syncMode == "auto") {
+        if (syncMode == "adaptive" || syncMode == "drift") {
             audioEngine_->alignSoftwareLatencies();
+            audioEngine_->enableDriftCorrection(true);
+            std::cout << "  Sync Mode: Automatic Software Alignment + Adaptive Micro-Resampling Drift Correction\n";
+        } else if (syncMode == "software" || syncMode == "auto") {
+            audioEngine_->alignSoftwareLatencies();
+            audioEngine_->enableDriftCorrection(false);
+            std::cout << "  Sync Mode: Static Software Latency Alignment\n";
         } else if (syncMode == "none" || syncMode == "off") {
             audioEngine_->setManualDelays({});
+            audioEngine_->enableDriftCorrection(false);
         }
     }
 
@@ -631,10 +648,17 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
         audioEngine_->setCalibrationOffsets(offsets);
     }
     if (!syncMode.empty()) {
-        if (syncMode == "software" || syncMode == "auto") {
+        if (syncMode == "adaptive" || syncMode == "drift") {
             audioEngine_->alignSoftwareLatencies();
+            audioEngine_->enableDriftCorrection(true);
+            std::cout << "  Sync Mode: Automatic Software Alignment + Adaptive Micro-Resampling Drift Correction\n";
+        } else if (syncMode == "software" || syncMode == "auto") {
+            audioEngine_->alignSoftwareLatencies();
+            audioEngine_->enableDriftCorrection(false);
+            std::cout << "  Sync Mode: Static Software Latency Alignment\n";
         } else if (syncMode == "none" || syncMode == "off") {
             audioEngine_->setManualDelays({});
+            audioEngine_->enableDriftCorrection(false);
         }
     }
 
@@ -1009,11 +1033,17 @@ int CommandInterface::handleLatencyTestCommand(const std::vector<std::string>& a
         std::cout << "  Calibration Offs:  " << offsetsStr << " ms\n";
     }
     if (!syncMode.empty()) {
-        if (syncMode == "software" || syncMode == "auto") {
+        if (syncMode == "adaptive" || syncMode == "drift") {
             audioEngine_->alignSoftwareLatencies();
+            audioEngine_->enableDriftCorrection(true);
+            std::cout << "  Sync Mode:         Automatic Software Alignment + Adaptive Micro-Resampling Drift Correction\n";
+        } else if (syncMode == "software" || syncMode == "auto") {
+            audioEngine_->alignSoftwareLatencies();
+            audioEngine_->enableDriftCorrection(false);
             std::cout << "  Sync Mode:         Automatic Software Latency Alignment\n";
         } else if (syncMode == "none" || syncMode == "off") {
             audioEngine_->setManualDelays({});
+            audioEngine_->enableDriftCorrection(false);
         }
     }
     std::cout << "\n";

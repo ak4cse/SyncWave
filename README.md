@@ -77,7 +77,13 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Delay configuration flags across playback commands: `--delay <d0,d1,...>`, `--sync <software|manual|none>`, `--offsets <o0,o1,...>`
   - Explicit physical acoustic latency disclaimers distinguishing software driver buffers from Bluetooth A2DP RF transport, DAC filters, and speaker acoustics.
   - Expanded test suite: 494 passing automated unit and integration tests.
-- [ ] **Milestone 10 — Dynamic Drift Correction & Micro-Resampling**
+- [x] **Milestone 10 — Controlled Long-Term Clock Drift Correction**
+  - Continuous micro-resampling rate adjustment in software (`Resampler`) with per-frame slew rate limiting ($\le 5.0\text{ ppm/s}$).
+  - Filtered drift estimation (`FilteredDriftEstimator`) enforcing minimum observation duration ($\ge 5.0\text{ s}$, $\ge 30\text{ samples}$), outlier rejection ($|\text{drift}| > 500\text{ ppm}$, $r^2 < 0.90$, rate jump $> 375\text{ ppm}$), and dual EMA smoothing ($\alpha_{\text{drift}} = 0.15$, $\alpha_{\text{phase}} = 0.20$).
+  - Closed-loop feedback controller (`DriftController`) with feedforward drift cancellation ($u_{\text{FF}} = -D$), proportional phase compensation ($K_p = 10.0\text{ ppm/ms}$), $\pm 1.0\text{ ms}$ deadband, and hard clamp to $\pm 100\text{ ppm}$.
+  - Real-time render thread remains strictly lock-free and zero-allocation; control updates run asynchronously at 10 Hz.
+  - New synchronization mode: `--sync adaptive` (performs initial delay alignment and maintains active drift correction).
+  - Expanded test suite: 560 passing tests including discrete synthetic multi-clock drift simulations over 1, 5, and 10 minutes.
 - [ ] **Milestone 11 — Automatic Calibration**
 
 ---
@@ -178,10 +184,16 @@ cmake --build build --config Release
 .\build\syncwave.exe calibrate --outputs 2,3 --offsets 0,50
 ```
 
-### Playback with Delay Alignment
+### Playback with Delay Alignment & Drift Correction
 ```powershell
 # Play test tone with automatic software latency alignment
 .\build\syncwave.exe tone --outputs 2,3 --sync software --duration 5
+
+# Play test tone with adaptive software alignment AND dynamic drift correction
+.\build\syncwave.exe tone --outputs 2,3 --sync adaptive --duration 30
+
+# Stream system audio loopback with adaptive drift correction
+.\build\syncwave.exe capture --source 3 --outputs 2,3 --sync adaptive --duration 60
 
 # Play test tone with explicit manual delays (e.g. 50ms on device 0, 0ms on device 1)
 .\build\syncwave.exe tone --outputs 2,3 --delay 50,0 --duration 5

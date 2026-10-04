@@ -18,6 +18,8 @@
 #include "../src/sync/DelayBuffer.h"
 #include "../src/sync/OutputLatencyModel.h"
 #include "../src/sync/SyncController.h"
+#include "../src/sync/SyncError.h"
+#include "../src/sync/FilteredDriftEstimator.h"
 
 #include <iostream>
 #include <cassert>
@@ -1999,9 +2001,349 @@ void testOutputRouterSyncPlanIntegration() {
     router.closeOutputs();
 }
 
+// Milestone 10 Tests
+
+void testResamplerRateAdjustmentAndSlewing() {
+    std::cout << "[TEST] Resampler Rate Adjustment & Slewing\n";
+
+    syncwave::Resampler resampler(48000, 48000, 2);
+    TEST_ASSERT(!resampler.hasRateAdjustment(), "Initially no rate adjustment");
+    TEST_ASSERT(resampler.targetRateAdjustmentPpm() == 0.0, "Target PPM initially 0.0");
+    TEST_ASSERT(resampler.currentRateAdjustmentPpm() == 0.0, "Current PPM initially 0.0");
+
+    // Immediate rate adjustment
+    resampler.setRateAdjustmentPpm(100.0, true);
+    TEST_ASSERT(resampler.hasRateAdjustment(), "hasRateAdjustment is true after +100 PPM");
+    TEST_ASSERT(resampler.targetRateAdjustmentPpm() == 100.0, "Target PPM is 100.0");
+    TEST_ASSERT(resampler.currentRateAdjustmentPpm() == 100.0, "Current PPM is immediately 100.0");
+    double expectedRatio = 1.0 * (1.0 + 100.0 / 1e6);
+    TEST_ASSERT(std::abs(resampler.ratio() - expectedRatio) < 1e-9, "Effective ratio includes +100 PPM");
+
+    // Negative immediate rate adjustment
+    resampler.setRateAdjustmentPpm(-50.0, true);
+    TEST_ASSERT(resampler.currentRateAdjustmentPpm() == -50.0, "Current PPM is immediately -50.0");
+    expectedRatio = 1.0 * (1.0 - 50.0 / 1e6);
+    TEST_ASSERT(std::abs(resampler.ratio() - expectedRatio) < 1e-9, "Effective ratio includes -50 PPM");
+
+    // Slew rate limiting test
+    resampler.setRateAdjustmentPpm(0.0, true);
+    resampler.setSlewRatePpmPerSecond(5.0); // 5 ppm/s slew limit
+    TEST_ASSERT(resampler.slewRatePpmPerSecond() == 5.0, "Slew rate is 5.0 ppm/s");
+
+    // Target +20 PPM without immediate
+    resampler.setRateAdjustmentPpm(20.0, false);
+    TEST_ASSERT(resampler.targetRateAdjustmentPpm() == 20.0, "Target PPM is 20.0");
+    TEST_ASSERT(resampler.currentRateAdjustmentPpm() == 0.0, "Current PPM is still 0.0 before processing");
+
+    // Process 1.0 second of audio (48000 frames)
+    std::vector<float> inAudio(48000 * 2, 0.5f);
+    std::vector<float> outAudio(48000 * 2, 0.0f);
+    size_t produced = resampler.process(inAudio.data(), 48000, outAudio.data(), 48000);
+    TEST_ASSERT(produced > 0, "Processed 1 second block");
+    TEST_ASSERT(std::abs(resampler.currentRateAdjustmentPpm() - 5.0) < 0.1, "After 1 second, current PPM slewed to ~5.0 PPM");
+
+    // Process another 1.0 second block (total 2.0s): should advance to ~10.0 PPM
+    resampler.process(inAudio.data(), 48000, outAudio.data(), 48000);
+    TEST_ASSERT(std::abs(resampler.currentRateAdjustmentPpm() - 10.0) < 0.1, "After 2 seconds, current PPM slewed to ~10.0 PPM");
+
+    // Process 3 more seconds (total 5.0s, need 10 more ppm): should reach 20.0 target PPM and hold
+    for (int i = 0; i < 3; ++i) {
+        resampler.process(inAudio.data(), 48000, outAudio.data(), 48000);
+    }
+    TEST_ASSERT(std::abs(resampler.currentRateAdjustmentPpm() - 20.0) < 0.01, "After 5 seconds, current PPM reached target 20.0 PPM exactly");
+}
+
+void testFilteredDriftEstimatorOutlierRejection() {
+    std::cout << "[TEST] FilteredDriftEstimator Outlier Rejection & Filtering\n";
+
+    syncwave::FilteredDriftEstimator estimator(5.0, 30, 500.0, 0.15, 0.20);
+    syncwave::DeviceClock clock("dev-test", 48000, 200);
+
+    auto t0 = std::chrono::steady_clock::now();
+
+    // 1. Check before minimum observation duration: should be invalid / not enough samples
+    for (int i = 0; i < 15; ++i) {
+        syncwave::DeviceClockSample s;
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        s.clockPosition = i * 4800; // 48000 Hz
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clock.recordSample(s);
+    }
+
+    auto res1 = estimator.update(clock, 1.5, 1.5, 10.0);
+    TEST_ASSERT(!res1.isValid, "Estimator invalid before 30 samples / 5.0s");
+
+    // 2. Add samples up to 55 samples (5.5s)
+    for (int i = 15; i < 55; ++i) {
+        syncwave::DeviceClockSample s;
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        s.clockPosition = i * 4800;
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clock.recordSample(s);
+    }
+
+    auto res2 = estimator.update(clock, 5.0, 5.0, 10.0);
+    TEST_ASSERT(res2.isValid, "Estimator valid after 54 samples and >5s observation");
+    TEST_ASSERT(!res2.isOutlierRejected, "Clean samples not rejected as outlier");
+    TEST_ASSERT(std::abs(res2.filteredDriftPpm) < 2.0, "Filtered drift near 0 for nominal 48000 Hz clock");
+    TEST_ASSERT(res2.confidence >= 0.90, "Confidence score >= 0.90");
+
+    // 3. Inject a corrupted outlier sample (+5000 PPM jump)
+    syncwave::DeviceClockSample spikeSample;
+    spikeSample.timestamp = t0 + std::chrono::milliseconds(55 * 100);
+    spikeSample.clockPosition = 55 * 4800 + 4800; // Massive jump
+    spikeSample.clockFrequency = 48000;
+    spikeSample.sampleRate = 48000;
+    spikeSample.isValid = true;
+    clock.recordSample(spikeSample);
+
+    auto resSpike = estimator.update(clock, 5.5, 5.5, 10.0);
+    TEST_ASSERT(resSpike.isOutlierRejected, "Massive clock jump successfully rejected as outlier");
+    TEST_ASSERT(std::abs(resSpike.filteredDriftPpm) < 5.0, "Filtered drift not corrupted by spike");
+}
+
+void testDriftControllerDeadbandAndClamping() {
+    std::cout << "[TEST] DriftController Deadband, Proportional Feedback, & Hard Clamping\n";
+
+    syncwave::DriftControllerConfig config;
+    config.deadbandMs = 1.0;
+    config.maxAdjustmentPpm = 100.0;
+    config.kp = 10.0; // 10 ppm per ms
+    config.enableFeedforward = true;
+    config.minObservationSec = 5.0;
+    config.minSamples = 30;
+    config.minConfidence = 0.90;
+
+    syncwave::DriftController controller(config);
+    controller.setEnabled(true);
+
+    syncwave::SyncError error;
+    error.isValid = true;
+    error.confidence = 0.95;
+    error.observationDurationSec = 6.0;
+
+    // Case 1: Inside positive deadband (+0.5 ms)
+    error.filteredPhaseErrorMs = 0.5;
+    error.filteredDriftPpm = 0.0;
+    auto out1 = controller.calculateCorrection(error);
+    TEST_ASSERT(out1.state == syncwave::DriftCorrectionState::Locked, "Inside deadband (+0.5 ms) is Locked");
+    TEST_ASSERT(out1.proportionalTermPpm == 0.0, "Proportional feedback is 0 inside deadband");
+    TEST_ASSERT(out1.targetRateAdjustmentPpm == 0.0, "Target PPM is 0.0 inside deadband");
+
+    // Case 2: Inside negative deadband (-0.8 ms)
+    error.filteredPhaseErrorMs = -0.8;
+    auto out2 = controller.calculateCorrection(error);
+    TEST_ASSERT(out2.state == syncwave::DriftCorrectionState::Locked, "Inside deadband (-0.8 ms) is Locked");
+    TEST_ASSERT(out2.proportionalTermPpm == 0.0, "Proportional feedback is 0 inside negative deadband");
+
+    // Case 3: Output lagging behind target (+2.5 ms) -> excess error = +1.5 ms
+    error.filteredPhaseErrorMs = 2.5;
+    error.filteredDriftPpm = 0.0;
+    auto out3 = controller.calculateCorrection(error);
+    TEST_ASSERT(out3.state == syncwave::DriftCorrectionState::Correcting, "+2.5 ms error is Correcting");
+    TEST_ASSERT(std::abs(out3.proportionalTermPpm - 15.0) < 1e-6, "Proportional feedback is +15.0 ppm for +2.5 ms error");
+    TEST_ASSERT(std::abs(out3.targetRateAdjustmentPpm - 15.0) < 1e-6, "Target PPM is +15.0 ppm (speed up)");
+    TEST_ASSERT(!out3.isClamped, "+15 ppm is within limits (not clamped)");
+
+    // Case 4: Output leading ahead of target (-3.0 ms) -> excess error = -2.0 ms
+    error.filteredPhaseErrorMs = -3.0;
+    auto out4 = controller.calculateCorrection(error);
+    TEST_ASSERT(out4.state == syncwave::DriftCorrectionState::Correcting, "-3.0 ms error is Correcting");
+    TEST_ASSERT(std::abs(out4.proportionalTermPpm - (-20.0)) < 1e-6, "Proportional feedback is -20.0 ppm for -3.0 ms error");
+    TEST_ASSERT(std::abs(out4.targetRateAdjustmentPpm - (-20.0)) < 1e-6, "Target PPM is -20.0 ppm (slow down)");
+
+    // Case 5: Large error exceeding clamp (+25 ms error)
+    error.filteredPhaseErrorMs = 25.0;
+    auto out5 = controller.calculateCorrection(error);
+    TEST_ASSERT(out5.isClamped, "Excessive PPM adjustment is clamped");
+    TEST_ASSERT(out5.targetRateAdjustmentPpm == 100.0, "Target PPM hard clamped to +100.0 PPM");
+
+    // Case 6: Large negative error exceeding clamp (-25 ms error)
+    error.filteredPhaseErrorMs = -25.0;
+    auto out6 = controller.calculateCorrection(error);
+    TEST_ASSERT(out6.isClamped, "Excessive negative adjustment is clamped");
+    TEST_ASSERT(out6.targetRateAdjustmentPpm == -100.0, "Target PPM hard clamped to -100.0 PPM");
+
+    // Case 7: Feedforward cancellation: clock is slow by -25 ppm, phase error inside deadband
+    error.filteredPhaseErrorMs = 0.2;
+    error.filteredDriftPpm = -25.0;
+    auto out7 = controller.calculateCorrection(error);
+    TEST_ASSERT(out7.state == syncwave::DriftCorrectionState::Locked, "In deadband with drift is Locked");
+    TEST_ASSERT(std::abs(out7.feedforwardTermPpm - 25.0) < 1e-6, "Feedforward term is +25.0 ppm to cancel -25 ppm drift");
+    TEST_ASSERT(std::abs(out7.targetRateAdjustmentPpm - 25.0) < 1e-6, "Target PPM matches feedforward +25.0 ppm");
+}
+
+void testDriftControllerStateTransitions() {
+    std::cout << "[TEST] DriftController State Machine Transitions\n";
+
+    syncwave::DriftControllerConfig config;
+    syncwave::DriftController controller(config);
+
+    TEST_ASSERT(controller.state() == syncwave::DriftCorrectionState::Disabled, "Initial state is Disabled");
+
+    controller.setEnabled(true);
+    TEST_ASSERT(controller.state() == syncwave::DriftCorrectionState::Initializing, "Enabling enters Initializing state");
+
+    syncwave::SyncError error;
+    error.isValid = true;
+    error.observationDurationSec = 2.0;
+    error.confidence = 0.95;
+    auto out = controller.calculateCorrection(error, true);
+    TEST_ASSERT(out.state == syncwave::DriftCorrectionState::Measuring, "Short observation enters Measuring state");
+
+    error.observationDurationSec = 6.0;
+    error.filteredPhaseErrorMs = 0.4;
+    out = controller.calculateCorrection(error, true);
+    TEST_ASSERT(out.state == syncwave::DriftCorrectionState::Locked, "Inside deadband enters Locked state");
+
+    error.filteredPhaseErrorMs = 2.5;
+    out = controller.calculateCorrection(error, true);
+    TEST_ASSERT(out.state == syncwave::DriftCorrectionState::Correcting, "Outside deadband enters Correcting state");
+
+    error.confidence = 0.70;
+    out = controller.calculateCorrection(error, true);
+    TEST_ASSERT(out.state == syncwave::DriftCorrectionState::Uncertain, "Low confidence enters Uncertain state");
+
+    out = controller.calculateCorrection(error, false);
+    TEST_ASSERT(out.state == syncwave::DriftCorrectionState::Disconnected, "Unavailable endpoint enters Disconnected state");
+    TEST_ASSERT(out.targetRateAdjustmentPpm == 0.0, "Disconnected endpoint commands 0.0 PPM");
+}
+
+void testSyntheticMultiClockDriftSimulation() {
+    std::cout << "[TEST] Synthetic Multi-Clock Drift Simulation (1 min, 5 min, 10 min)\n";
+
+    constexpr double nominalRate = 48000.0;
+    constexpr double deviceBRate = 47999.0;
+    const double expectedDriftPpm = ((deviceBRate - nominalRate) / nominalRate) * 1e6; // -20.833 ppm
+    TEST_ASSERT(std::abs(expectedDriftPpm - (-20.833333)) < 0.01, "Expected nominal drift is -20.83 ppm");
+
+    auto simulateUncorrectedPhaseErrorMs = [](double durationSec) {
+        return durationSec * (20.83333333 / 1e6) * 1000.0;
+    };
+
+    double uncorrected1Min = simulateUncorrectedPhaseErrorMs(60.0);
+    double uncorrected5Min = simulateUncorrectedPhaseErrorMs(300.0);
+    double uncorrected10Min = simulateUncorrectedPhaseErrorMs(600.0);
+
+    TEST_ASSERT(std::abs(uncorrected1Min - 1.25) < 0.05, "Uncorrected 1-min drift reaches ~1.25 ms (> 1.0ms deadband)");
+    TEST_ASSERT(std::abs(uncorrected5Min - 6.25) < 0.1, "Uncorrected 5-min drift reaches ~6.25 ms (linear divergence)");
+    TEST_ASSERT(std::abs(uncorrected10Min - 12.5) < 0.2, "Uncorrected 10-min drift reaches ~12.5 ms (significant latency lag)");
+
+    syncwave::DeviceClock clockB("dev-b", 48000, 1000);
+    syncwave::FilteredDriftEstimator estimator(5.0, 30, 500.0, 0.15, 0.20);
+    syncwave::DriftControllerConfig config;
+    config.deadbandMs = 1.0;
+    config.maxAdjustmentPpm = 100.0;
+    config.kp = 10.0;
+    config.enableFeedforward = true;
+    syncwave::DriftController controller(config);
+    controller.setEnabled(true);
+
+    syncwave::Resampler resamplerB(48000, 48000, 2);
+    resamplerB.setSlewRatePpmPerSecond(5.0);
+
+    double outputBPlayheadSec = 0.0;
+    double masterTimelineSec = 0.0;
+    double maxPhaseErrorAfterLockMs = 0.0;
+    double phaseErrorAt1Min = 0.0;
+    double phaseErrorAt5Min = 0.0;
+    double phaseErrorAt10Min = 0.0;
+
+    auto simStart = std::chrono::steady_clock::now();
+
+    for (int step = 0; step < 6000; ++step) {
+        double t = (step + 1) * 0.1; // 100 ms step
+        masterTimelineSec = t;
+
+        double framesRenderedThisStep = 4799.9; // 47999 Hz * 0.1s
+        double masterFramesConsumed = framesRenderedThisStep * (1.0 + resamplerB.currentRateAdjustmentPpm() / 1e6);
+        outputBPlayheadSec += masterFramesConsumed / 48000.0;
+
+        syncwave::DeviceClockSample s;
+        s.timestamp = simStart + std::chrono::milliseconds(static_cast<int>(t * 1000.0));
+        s.clockPosition = static_cast<uint64_t>(t * 47999.0);
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clockB.recordSample(s);
+
+        auto syncErr = estimator.updateSyncError(
+            "dev-b", "Device B", clockB,
+            masterTimelineSec, static_cast<uint64_t>(masterTimelineSec * 48000),
+            masterTimelineSec, outputBPlayheadSec);
+
+        auto correction = controller.calculateCorrection(syncErr);
+        resamplerB.setRateAdjustmentPpm(correction.targetRateAdjustmentPpm, false);
+
+        std::vector<float> dummyIn(4800 * 2, 0.0f);
+        std::vector<float> dummyOut(4800 * 2, 0.0f);
+        resamplerB.process(dummyIn.data(), 4800, dummyOut.data(), 4800);
+
+        double phaseErrMs = syncErr.phaseErrorMs;
+
+        if (step == 600) {
+            phaseErrorAt1Min = phaseErrMs;
+        }
+        if (step == 3000) {
+            phaseErrorAt5Min = phaseErrMs;
+        }
+        if (step == 5999) {
+            phaseErrorAt10Min = phaseErrMs;
+        }
+
+        if (t > 15.0) {
+            maxPhaseErrorAfterLockMs = std::max(maxPhaseErrorAfterLockMs, std::abs(phaseErrMs));
+        }
+    }
+
+    TEST_ASSERT(std::abs(phaseErrorAt1Min) <= 1.0, "Corrected 1-min phase error strictly <= 1.0 ms deadband");
+    TEST_ASSERT(std::abs(phaseErrorAt5Min) <= 1.0, "Corrected 5-min phase error strictly <= 1.0 ms deadband");
+    TEST_ASSERT(std::abs(phaseErrorAt10Min) <= 1.0, "Corrected 10-min phase error strictly <= 1.0 ms deadband");
+    TEST_ASSERT(maxPhaseErrorAfterLockMs <= 1.05, "Max phase error in steady state strictly bounded within deadband");
+    TEST_ASSERT(std::abs(resamplerB.currentRateAdjustmentPpm() - 20.83) < 2.0, "Resampler rate adjustment converged to match drift (+20.8 ppm)");
+}
+
+void testDeviceOutputAndRouterDriftIntegration() {
+    std::cout << "[TEST] DeviceOutput & OutputRouter Drift Correction Integration\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"dev-1", "Realtek Audio", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"dev-2", "Bluetooth Buds", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+    router.initializeOutputsForTesting(48000, 2);
+
+    TEST_ASSERT(!router.isDriftCorrectionEnabled(), "Drift correction initially disabled in router");
+
+    router.setDriftCorrectionEnabled(true);
+    TEST_ASSERT(router.isDriftCorrectionEnabled(), "Drift correction enabled in router");
+
+    auto* out1 = router.getOutput("dev-1");
+    auto* out2 = router.getOutput("dev-2");
+    TEST_ASSERT(out1->isDriftCorrectionEnabled(), "Output 1 inherits drift correction enabled");
+    TEST_ASSERT(out2->isDriftCorrectionEnabled(), "Output 2 inherits drift correction enabled");
+
+    std::vector<float> chunk(4800 * 2, 0.1f);
+    router.route(chunk.data(), 4800);
+    router.sampleAllClocks();
+
+    auto telem1 = out1->getTelemetry();
+    TEST_ASSERT(telem1.driftState != syncwave::DriftCorrectionState::Disabled, "Telemetry reports active drift controller state");
+
+    router.onDeviceDisconnected("dev-2");
+    auto telem2 = out2->getTelemetry();
+    TEST_ASSERT(telem2.driftState == syncwave::DriftCorrectionState::Disconnected, "Disconnected output enters Disconnected state");
+    TEST_ASSERT(telem2.targetRateAdjustmentPpm == 0.0, "Disconnected output resets target rate adjustment");
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 9)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 10)  \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -2054,6 +2396,14 @@ int main() {
     testSyncControllerAlignmentMath();
     testDeviceOutputDelayBufferIntegration();
     testOutputRouterSyncPlanIntegration();
+
+    // Milestone 10 Tests
+    testResamplerRateAdjustmentAndSlewing();
+    testFilteredDriftEstimatorOutlierRejection();
+    testDriftControllerDeadbandAndClamping();
+    testDriftControllerStateTransitions();
+    testSyntheticMultiClockDriftSimulation();
+    testDeviceOutputAndRouterDriftIntegration();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

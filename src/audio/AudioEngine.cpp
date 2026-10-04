@@ -370,6 +370,15 @@ SyncPlan AudioEngine::alignSoftwareLatencies() {
     return activeSyncPlan_;
 }
 
+void AudioEngine::enableDriftCorrection(bool enable) {
+    driftCorrectionRequested_ = enable;
+    router_.setDriftCorrectionEnabled(enable);
+}
+
+bool AudioEngine::isDriftCorrectionEnabled() const {
+    return router_.isDriftCorrectionEnabled();
+}
+
 void AudioEngine::applyPendingSync() {
     for (size_t i = 0; i < pendingCalibrationOffsets_.size(); ++i) {
         router_.setDeviceCalibrationOffsetMs(i, pendingCalibrationOffsets_[i]);
@@ -383,6 +392,10 @@ void AudioEngine::applyPendingSync() {
         activeSyncPlan_ = alignSoftwareLatencies();
     } else {
         router_.setSyncStateAll(SyncState::Disabled);
+    }
+
+    if (driftCorrectionRequested_) {
+        router_.setDriftCorrectionEnabled(true);
     }
 }
 

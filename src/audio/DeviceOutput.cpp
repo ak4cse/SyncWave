@@ -6,7 +6,9 @@ namespace syncwave {
 DeviceOutput::DeviceOutput(const AudioDevice& device)
     : device_(device),
       wasapiOutput_(std::make_unique<WasapiOutput>()),
-      clock_(device.id, 48000) {}
+      clock_(device.id, 48000),
+      driftEstimator_(5.0, 30, 500.0, 0.15, 0.20),
+      driftController_() {}
 
 DeviceOutput::~DeviceOutput() {
     close();
@@ -44,6 +46,7 @@ bool DeviceOutput::initialize(uint32_t masterSampleRate, uint32_t masterChannels
     renderScratch_.assign(8192 * format_.channels, 0.0f);
 
     clock_ = DeviceClock(device_.id, format_.sampleRate);
+    resetDriftCorrection();
 
     framesRouted_.store(0, std::memory_order_relaxed);
     framesConsumed_.store(0, std::memory_order_relaxed);
@@ -77,6 +80,7 @@ bool DeviceOutput::initializeForTesting(uint32_t masterSampleRate, uint32_t mast
     renderScratch_.assign(8192 * format_.channels, 0.0f);
 
     clock_ = DeviceClock(device_.id, format_.sampleRate);
+    resetDriftCorrection();
 
     framesRouted_.store(0, std::memory_order_relaxed);
     framesConsumed_.store(0, std::memory_order_relaxed);
@@ -102,14 +106,14 @@ bool DeviceOutput::start() {
         }
         float* intermediate = renderScratch_.data();
 
-        if (masterSampleRate_ == outFormat.sampleRate) {
+        if (masterSampleRate_ == outFormat.sampleRate && (!resampler_ || !resampler_->hasRateAdjustment())) {
             size_t readCount = queue_->read(intermediate, frameCount);
             framesConsumed_.fetch_add(readCount, std::memory_order_relaxed);
             if (readCount < frameCount) {
                 std::fill(intermediate + (readCount * channels), intermediate + (frameCount * channels), 0.0f);
                 queueUnderruns_.fetch_add(frameCount - readCount, std::memory_order_relaxed);
             }
-        } else {
+        } else if (resampler_) {
             size_t produced = resampler_->pull(*queue_, intermediate, frameCount);
             framesResampled_.fetch_add(produced, std::memory_order_relaxed);
             if (produced < frameCount) {
@@ -148,35 +152,47 @@ void DeviceOutput::close() {
     if (delayBuffer_) {
         delayBuffer_->reset();
     }
+    resetDriftCorrection();
 }
 
 size_t DeviceOutput::push(const float* sourceFrames, size_t frameCount) {
-    if (!queue_ || !isAvailable()) {
+    if (!queue_ || !isAvailable_.load(std::memory_order_relaxed)) {
         return 0;
     }
-
-    size_t free = queue_->availableToWrite();
-    if (free < frameCount) {
-        queueOverruns_.fetch_add(frameCount - free, std::memory_order_relaxed);
-    }
-
     size_t written = queue_->write(sourceFrames, frameCount);
     framesRouted_.fetch_add(written, std::memory_order_relaxed);
+    if (written < frameCount) {
+        queueOverruns_.fetch_add(frameCount - written, std::memory_order_relaxed);
+    }
     return written;
 }
 
 OutputState DeviceOutput::state() const {
-    return wasapiOutput_ ? wasapiOutput_->state() : OutputState::Uninitialized;
+    if (!isAvailable_.load(std::memory_order_relaxed)) {
+        return OutputState::Error;
+    }
+    if (wasapiOutput_) {
+        return wasapiOutput_->state();
+    }
+    return OutputState::Uninitialized;
 }
 
 AudioFormat DeviceOutput::format() const {
     return format_;
 }
 
+void DeviceOutput::markUnavailable() {
+    isAvailable_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    driftController_.setState(DriftCorrectionState::Disconnected);
+}
+
 DeviceClockSample DeviceOutput::sampleClock(std::chrono::steady_clock::time_point timestamp) {
-    if (wasapiOutput_) {
+    if (wasapiOutput_ && wasapiOutput_->state() == OutputState::Running) {
         auto snap = wasapiOutput_->getClockSnapshot();
         clock_.recordSnapshot(snap, timestamp);
+        auto s = clock_.latestSample();
+        return s ? *s : DeviceClockSample{};
     }
     auto latest = clock_.latestSample();
     return latest.value_or(DeviceClockSample{});
@@ -187,9 +203,9 @@ DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
     t.deviceId = device_.id;
     t.deviceName = device_.name;
     t.state = state();
+    t.isAvailable = isAvailable_.load(std::memory_order_relaxed);
     t.format = format_;
     t.masterSampleRate = masterSampleRate_;
-    t.isAvailable = isAvailable();
 
     if (wasapiOutput_ && wasapiOutput_->state() == OutputState::Running) {
         t.bufferFrameCount = wasapiOutput_->bufferFrameCount();
@@ -262,6 +278,21 @@ DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
     t.configuredDelayMs = t.latencyModel.configuredDelayMs;
     t.appliedDelayFrames = t.latencyModel.appliedDelayFrames;
     t.syncState = t.latencyModel.syncState;
+    if (resampler_) {
+        t.targetRateAdjustmentPpm = resampler_->targetRateAdjustmentPpm();
+        t.currentRateAdjustmentPpm = resampler_->currentRateAdjustmentPpm();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(syncErrorMutex_);
+        t.driftState = driftController_.state();
+        t.syncError = latestSyncError_;
+        t.rawDriftPpm = latestSyncError_.rawDriftPpm;
+        t.filteredDriftPpm = latestSyncError_.filteredDriftPpm;
+        t.phaseErrorMs = latestSyncError_.phaseErrorMs;
+        t.filteredPhaseErrorMs = latestSyncError_.filteredPhaseErrorMs;
+        t.driftConfidence = latestSyncError_.confidence;
+    }
 
     return t;
 }
@@ -385,6 +416,114 @@ OutputLatencyModel DeviceOutput::getLatencyModel() const {
     model.syncState = syncState_.load(std::memory_order_relaxed);
     model.updateTotals();
     return model;
+}
+
+void DeviceOutput::setRateAdjustmentPpm(double ppm, bool immediate) {
+    if (resampler_) {
+        resampler_->setRateAdjustmentPpm(ppm, immediate);
+    }
+}
+
+double DeviceOutput::rateAdjustmentPpm() const {
+    return resampler_ ? resampler_->targetRateAdjustmentPpm() : 0.0;
+}
+
+double DeviceOutput::currentRateAdjustmentPpm() const {
+    return resampler_ ? resampler_->currentRateAdjustmentPpm() : 0.0;
+}
+
+bool DeviceOutput::hasRateAdjustment() const {
+    return resampler_ ? resampler_->hasRateAdjustment() : false;
+}
+
+void DeviceOutput::setDriftCorrectionEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    driftController_.setEnabled(enabled);
+    if (!enabled) {
+        setRateAdjustmentPpm(0.0, true);
+    }
+}
+
+bool DeviceOutput::isDriftCorrectionEnabled() const {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    return driftController_.isEnabled();
+}
+
+void DeviceOutput::setDriftControllerConfig(const DriftControllerConfig& config) {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    driftController_.setConfig(config);
+    if (resampler_) {
+        resampler_->setSlewRatePpmPerSecond(config.maxSlewRatePpmPerSec);
+    }
+}
+
+const DriftControllerConfig& DeviceOutput::driftControllerConfig() const {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    return driftController_.config();
+}
+
+DriftCorrectionState DeviceOutput::driftCorrectionState() const {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    return driftController_.state();
+}
+
+SyncError DeviceOutput::latestSyncError() const {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    return latestSyncError_;
+}
+
+DriftCorrectionOutput DeviceOutput::latestDriftCorrection() const {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    return latestCorrection_;
+}
+
+void DeviceOutput::resetDriftCorrection() {
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    driftEstimator_.reset();
+    driftController_.reset();
+    latestSyncError_ = SyncError{};
+    latestCorrection_ = DriftCorrectionOutput{};
+    setRateAdjustmentPpm(0.0, true);
+}
+
+void DeviceOutput::updateDriftCorrection(double masterTimelineSec, uint64_t masterTimelineFrames, double targetLatencySec) {
+    if (!isAvailable_.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(syncErrorMutex_);
+        driftController_.setState(DriftCorrectionState::Disconnected);
+        return;
+    }
+
+    double outPlayheadSec = wasapiClockPlayheadSeconds();
+    if (outPlayheadSec <= 0.0) {
+        outPlayheadSec = estimatedAppPlayheadSeconds();
+    }
+
+    double targetSec = 0.0;
+    if (targetLatencySec >= 0.0) {
+        targetSec = masterTimelineSec - targetLatencySec;
+    } else {
+        auto model = getLatencyModel();
+        targetSec = masterTimelineSec - (model.effectiveLatencyMs / 1000.0);
+    }
+    if (targetSec < 0.0) {
+        targetSec = 0.0;
+    }
+
+    std::lock_guard<std::mutex> lock(syncErrorMutex_);
+    latestSyncError_ = driftEstimator_.updateSyncError(
+        device_.id,
+        device_.name,
+        clock_,
+        masterTimelineSec,
+        masterTimelineFrames,
+        targetSec,
+        outPlayheadSec,
+        masterSampleRate_);
+
+    if (driftController_.isEnabled()) {
+        latestCorrection_ = driftController_.calculateCorrection(latestSyncError_, isAvailable());
+        setRateAdjustmentPpm(latestCorrection_.targetRateAdjustmentPpm);
+    }
 }
 
 } // namespace syncwave

@@ -385,4 +385,72 @@ To ensure safety:
    - `--sync software`: Automatic software-domain alignment.
    - `--offsets <o0,o1>`: Manual physical calibration offsets.
 
+---
 
+## 10. Milestone 10: Controlled Long-Term Clock Drift Correction
+
+### Component Hierarchy
+```text
+                    [AudioEngine] / [Control Thread @ 10 Hz]
+                                       |
+                                       | sampleAllClocks() / updateDriftCorrection()
+                                       v
+                                 [OutputRouter]
+                                /              \
+                               v                v
+                        [DeviceOutput 1] [DeviceOutput 2]
+                        +-----------------------------------------------+
+                        | SPSC Queue (1.0s, canonical 48 kHz Float32)   |
+                        |                                               |
+                        | [FilteredDriftEstimator]                      |
+                        |   - Windowed OLS regression                   |
+                        |   - Min observation check (>=5.0s, >=30 pts)  |
+                        |   - Outlier rejection (|drift|>500ppm, r^2<0.9|
+                        |   - Dual EMA smoothing (alpha_drift=0.15)     |
+                        |                                               |
+                        | [DriftController]                             |
+                        |   - DriftCorrectionState state machine        |
+                        |   - +/-1.0 ms deadband                        |
+                        |   - Proportional control (Kp = 10.0 ppm/ms)   |
+                        |   - Feedforward cancellation (-drift)         |
+                        |   - Hard clamp (+/-100 ppm)                   |
+                        |                                               |
+                        | [Resampler]                                   |
+                        |   - Micro-resampling rate adjustment          |
+                        |   - Slew rate limiter (<= 5.0 ppm/s)          |
+                        |   - Continuous per-frame linear interpolation |
+                        |                                               |
+                        | [DelayBuffer] (Fixed alignment stage)         |
+                        |                                               |
+                        | [WasapiOutput] (MMCSS "Pro Audio")            |
+                        +-----------------------------------------------+
+                               |                |
+                               v                v
+                        [Physical HW 1]  [Physical HW 2]
+```
+
+### Key Subsystems
+1. **`Resampler` Micro-Rate Adjustment & Slew Rate Limiter**:
+   - Software-domain micro-resampling adjustments parameterized by target PPM:
+     $$R_{\text{eff}} = R_{\text{base}} \times \left(1 + \frac{\text{ppm}}{10^6}\right)$$
+   - Continuous per-frame linear ratio interpolation: smoothly slews `currentAdjustmentPpm_` toward `targetAdjustmentPpm_` at a bounded rate ($\le 5.0\text{ ppm/s}$).
+   - Prevents sudden pitch shifts, clicks, or phase discontinuities.
+   - When $\text{ppm} \ne 0$, bypasses memory copy optimizations to ensure deterministic fractional phase progression.
+   - Independent of hardware driver capabilities (does not rely on `IAudioClockAdjustment`).
+2. **`FilteredDriftEstimator`**:
+   - Maintains windowed OLS regression over valid `WasapiClockSnapshot` history.
+   - Enforces strict qualification criteria: minimum 5.0 seconds observation and $\ge 30$ data points before producing confident drift estimates.
+   - Multi-stage outlier rejection: rejects unphysical deviations ($|\text{drift}| > 500\text{ ppm}$), poor linear fit ($r^2 < 0.90$), and sudden rate jumps ($> 375\text{ ppm}$).
+   - Dual Exponential Moving Average (EMA) filters for drift rate ($\alpha = 0.15$) and phase error ($\alpha = 0.20$) to eliminate high-frequency jitter.
+3. **`DriftController`**:
+   - State machine tracking: `Disabled`, `Initializing`, `Measuring`, `Locked`, `Correcting`, `Uncertain`, `Disconnected`.
+   - Deadband ($\pm 1.0\text{ ms}$): prevents unnecessary control activity under minor timing jitter.
+   - Combined Feedforward and Proportional Feedback Control:
+     $$u_{\text{FF}} = -D_{\text{filtered}}$$
+     $$u_P = -K_p \times \text{sign}(e) \times (|e| - \text{deadband}) \quad (\text{for } |e| > \text{deadband})$$
+     $$u(t) = \text{clamp}(u_{\text{FF}} + u_P, -100, +100)$$
+4. **Zero-Contention Real-Time Safety**:
+   - The real-time render thread performs only slewed ratio evaluation and sample interpolation; no mutex locks, heap allocations, or floating-point transcendental functions occur on the audio callback path.
+   - Control calculations are executed asynchronously on the 10 Hz control loop.
+5. **Physical Acoustic Disclaimer**:
+   - Maintains the clear distinction between software buffer alignment / clock rate drift and external physical acoustic latency (RF packetization, DAC filters, speaker room propagation).
