@@ -15,6 +15,9 @@
 #include "../src/sync/DriftEstimator.h"
 #include "../src/app/CommandInterface.h"
 #include "../src/sync/SyncPulseGenerator.h"
+#include "../src/sync/DelayBuffer.h"
+#include "../src/sync/OutputLatencyModel.h"
+#include "../src/sync/SyncController.h"
 
 #include <iostream>
 #include <cassert>
@@ -1713,9 +1716,292 @@ void testOutputRouterMultiWindowPairwise() {
     router.closeOutputs();
 }
 
+void testDelayBufferBasics() {
+    std::cout << "[TEST] DelayBuffer Basic Delay & Passthrough\n";
+
+    syncwave::DelayBuffer db(48000);
+    TEST_ASSERT(db.delayFrames() == 0, "Initial delay is 0 frames");
+    TEST_ASSERT(db.delayMs(48000) == 0.0, "Initial delay is 0.0 ms");
+    TEST_ASSERT(db.maxCapacityFrames() >= 48000, "Max delay frames >= 48000");
+
+    // Zero-delay passthrough
+    std::vector<float> input = { 0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f };
+    std::vector<float> output(6, 0.0f);
+    db.process(input.data(), output.data(), 3);
+    TEST_ASSERT(output[0] == 0.1f && output[1] == 0.2f, "Zero delay frame 0 identical");
+    TEST_ASSERT(output[2] == 0.3f && output[3] == 0.4f, "Zero delay frame 1 identical");
+    TEST_ASSERT(output[4] == 0.5f && output[5] == 0.6f, "Zero delay frame 2 identical");
+
+    // In-place zero-delay passthrough
+    db.process(input.data(), input.data(), 3);
+    TEST_ASSERT(input[0] == 0.1f && input[1] == 0.2f, "In-place zero delay passthrough works");
+
+    // 1-frame delay
+    db.reset();
+    db.setDelayFrames(1);
+    TEST_ASSERT(db.delayFrames() == 1, "Delay is 1 frame");
+    std::vector<float> in1 = { 1.0f, 1.1f, 2.0f, 2.1f, 3.0f, 3.1f };
+    std::vector<float> out1(6, -99.0f);
+    db.process(in1.data(), out1.data(), 3);
+    TEST_ASSERT(out1[0] == 0.0f && out1[1] == 0.0f, "Frame 0 is prefilled silence");
+    TEST_ASSERT(out1[2] == 1.0f && out1[3] == 1.1f, "Frame 1 outputs in1[0]");
+    TEST_ASSERT(out1[4] == 2.0f && out1[5] == 2.1f, "Frame 2 outputs in1[1]");
+
+    // Read 1 more frame
+    std::vector<float> in2 = { 4.0f, 4.1f };
+    std::vector<float> out2(2, -99.0f);
+    db.process(in2.data(), out2.data(), 1);
+    TEST_ASSERT(out2[0] == 3.0f && out2[1] == 3.1f, "Next frame outputs in1[2]");
+}
+
+void testDelayBufferIntegrityAndWraparound() {
+    std::cout << "[TEST] DelayBuffer Data Integrity & Circular Wraparound\n";
+
+    // Setup 100-frame delay at 48 kHz
+    syncwave::DelayBuffer db(10000); // 10,000 frames capacity
+    db.setDelayFrames(100);
+    TEST_ASSERT(db.delayFrames() == 100, "Delay set to 100 frames");
+
+    const size_t totalFrames = 50000;
+    std::vector<float> source(totalFrames * 2);
+    for (size_t i = 0; i < totalFrames; ++i) {
+        source[i * 2] = static_cast<float>(i + 1);
+        source[i * 2 + 1] = -static_cast<float>(i + 1);
+    }
+
+    std::vector<float> received(totalFrames * 2, 0.0f);
+    const size_t chunkSize = 128;
+    for (size_t offset = 0; offset < totalFrames; offset += chunkSize) {
+        size_t count = std::min(chunkSize, totalFrames - offset);
+        db.process(source.data() + offset * 2, received.data() + offset * 2, count);
+    }
+
+    // Verify first 100 frames are silence
+    bool leadInSilent = true;
+    for (size_t i = 0; i < 100; ++i) {
+        if (received[i * 2] != 0.0f || received[i * 2 + 1] != 0.0f) {
+            leadInSilent = false;
+            break;
+        }
+    }
+    TEST_ASSERT(leadInSilent, "First 100 frames are strictly initial silence");
+
+    // Verify frames 100..49999 match source 0..49899
+    bool streamMatched = true;
+    for (size_t i = 100; i < totalFrames; ++i) {
+        size_t srcIdx = i - 100;
+        float expectedL = static_cast<float>(srcIdx + 1);
+        float expectedR = -static_cast<float>(srcIdx + 1);
+        if (received[i * 2] != expectedL || received[i * 2 + 1] != expectedR) {
+            streamMatched = false;
+            break;
+        }
+    }
+    TEST_ASSERT(streamMatched, "50,000 frames through circular delay matched with zero corruption or loss");
+
+    // Dynamic delay adjustment from ms
+    db.setDelayMs(10.0, 48000); // 10ms at 48kHz = 480 frames
+    TEST_ASSERT(db.delayFrames() == 480, "10.0 ms converts to 480 frames at 48 kHz");
+    TEST_ASSERT(std::abs(db.delayMs(48000) - 10.0) < 0.001, "delayMs(48000) returns 10.0 ms");
+
+    // Reset clears state
+    db.reset();
+    TEST_ASSERT(db.delayFrames() == 480, "Reset retains configured delay size");
+    std::vector<float> testIn(480 * 2, 5.0f);
+    std::vector<float> testOut(480 * 2, -1.0f);
+    db.process(testIn.data(), testOut.data(), 480);
+    bool resetSilent = true;
+    for (size_t i = 0; i < 480 * 2; ++i) {
+        if (testOut[i] != 0.0f) { resetSilent = false; break; }
+    }
+    TEST_ASSERT(resetSilent, "Buffer prefills with silence after reset");
+}
+
+void testOutputLatencyModel() {
+    std::cout << "[TEST] OutputLatencyModel Arithmetic & State Mapping\n";
+
+    syncwave::OutputLatencyModel model;
+    model.deviceId = "dev-test";
+    model.deviceName = "Test Endpoint";
+    model.sampleRate = 48000;
+    model.wasapiStreamLatencyMs = 10.0;
+    model.wasapiPaddingMs = 5.0;
+    model.queueLatencyMs = 2.0;
+    model.resamplerLatencyMs = 0.5;
+    model.updateTotals();
+
+    TEST_ASSERT(std::abs(model.estimatedSoftwareLatencyMs - 17.5) < 0.001, 
+                "estimatedSoftwareLatencyMs is exactly sum of components (17.5 ms)");
+    TEST_ASSERT(std::abs(model.effectiveLatencyMs - 17.5) < 0.001, 
+                "effectiveLatencyMs equals software latency when calibration offset is 0");
+
+    // Apply manual calibration offset (e.g. +50ms physical acoustic latency)
+    model.optionalCalibrationOffsetMs = 50.0;
+    model.recalculate();
+    TEST_ASSERT(std::abs(model.effectiveLatencyMs - 67.5) < 0.001, 
+                "effectiveLatencyMs incorporates calibration offset (67.5 ms)");
+
+    // Test sync state strings
+    TEST_ASSERT(syncwave::syncStateToString(syncwave::SyncState::Disabled) == "Disabled", "SyncState::Disabled string");
+    TEST_ASSERT(syncwave::syncStateToString(syncwave::SyncState::Manual) == "Manual", "SyncState::Manual string");
+    TEST_ASSERT(syncwave::syncStateToString(syncwave::SyncState::SoftwareCalibrated) == "SoftwareCalibrated", "SyncState::SoftwareCalibrated string");
+    TEST_ASSERT(syncwave::syncStateToString(syncwave::SyncState::PhysicallyCalibrated) == "PhysicallyCalibrated", "SyncState::PhysicallyCalibrated string");
+    TEST_ASSERT(syncwave::syncStateToString(syncwave::SyncState::Uncertain) == "Uncertain", "SyncState::Uncertain string");
+}
+
+void testSyncControllerAlignmentMath() {
+    std::cout << "[TEST] SyncController Latency Alignment Mathematics\n";
+
+    // 2 devices: Dev0 = 20.0 ms, Dev1 = 60.0 ms
+    syncwave::OutputLatencyModel m0;
+    m0.deviceName = "Fast Dev";
+    m0.sampleRate = 48000;
+    m0.wasapiStreamLatencyMs = 20.0;
+    m0.updateTotals();
+
+    syncwave::OutputLatencyModel m1;
+    m1.deviceName = "Slow Dev";
+    m1.sampleRate = 44100;
+    m1.wasapiStreamLatencyMs = 60.0;
+    m1.updateTotals();
+
+    std::vector<syncwave::OutputLatencyModel> models = { m0, m1 };
+
+    double targetLatency = syncwave::SyncController::calculateTargetLatency(models);
+    TEST_ASSERT(std::abs(targetLatency - 60.0) < 0.001, "Target latency is max latency (60.0 ms)");
+
+    double d0 = syncwave::SyncController::calculateDeviceDelay(targetLatency, m0);
+    double d1 = syncwave::SyncController::calculateDeviceDelay(targetLatency, m1);
+    TEST_ASSERT(std::abs(d0 - 40.0) < 0.001, "Fast device delay is 40.0 ms (60 - 20)");
+    TEST_ASSERT(std::abs(d1 - 0.0) < 0.001, "Slow device delay is 0.0 ms (slowest path = baseline)");
+
+    // Compute plan
+    auto plan = syncwave::SyncController::computeSoftwareAlignmentPlan(models);
+    TEST_ASSERT(plan.isValid, "Software alignment plan is valid");
+    TEST_ASSERT(plan.syncState == syncwave::SyncState::SoftwareCalibrated, "Plan state is SoftwareCalibrated");
+    TEST_ASSERT(plan.calculatedDelaysMs.size() == 2, "2 delay values in plan");
+    TEST_ASSERT(std::abs(plan.calculatedDelaysMs[0] - 40.0) < 0.001, "Dev0 delay is 40.0 ms");
+    TEST_ASSERT(std::abs(plan.calculatedDelaysMs[1] - 0.0) < 0.001, "Dev1 delay is 0.0 ms");
+
+    // Frame conversions at different sample rates
+    // Dev0 @ 48kHz: 40ms = 1920 frames
+    // Dev1 @ 44.1kHz: 0ms = 0 frames
+    TEST_ASSERT(plan.calculatedDelaysFrames[0] == 1920, "Dev0 40ms @ 48kHz is exactly 1920 frames");
+    TEST_ASSERT(plan.calculatedDelaysFrames[1] == 0, "Dev1 0ms is 0 frames");
+
+    // Physical calibration offset test:
+    // Suppose Fast Dev has 100 ms physical Bluetooth acoustic delay
+    models[0].optionalCalibrationOffsetMs = 100.0;
+    models[0].updateTotals(); // effective = 120.0 ms
+    auto physPlan = syncwave::SyncController::computeSoftwareAlignmentPlan(models);
+    TEST_ASSERT(physPlan.syncState == syncwave::SyncState::PhysicallyCalibrated, "State is PhysicallyCalibrated when offsets present");
+    TEST_ASSERT(std::abs(physPlan.targetLatencyMs - 120.0) < 0.001, "Target latency is 120.0 ms");
+    TEST_ASSERT(std::abs(physPlan.calculatedDelaysMs[0] - 0.0) < 0.001, "Dev0 now gets 0 delay (slowest acoustic path)");
+    TEST_ASSERT(std::abs(physPlan.calculatedDelaysMs[1] - 60.0) < 0.001, "Dev1 gets 60 ms delay (120 - 60)");
+    // Dev1 @ 44.1kHz: 60ms = 2646 frames
+    TEST_ASSERT(physPlan.calculatedDelaysFrames[1] == 2646, "Dev1 60ms @ 44.1kHz is 2646 frames");
+
+    // Manual plan test with clamping
+    std::vector<double> manualDelays = { -10.0, 25.5 };
+    auto manPlan = syncwave::SyncController::computeManualPlan(models, manualDelays);
+    TEST_ASSERT(manPlan.isValid, "Manual plan is valid");
+    TEST_ASSERT(manPlan.syncState == syncwave::SyncState::Manual, "Plan state is Manual");
+    TEST_ASSERT(manPlan.calculatedDelaysMs[0] == 0.0, "Negative manual delay clamped to 0.0 ms");
+    TEST_ASSERT(std::abs(manPlan.calculatedDelaysMs[1] - 25.5) < 0.001, "Positive manual delay retained");
+
+    // 3 devices alignment
+    syncwave::OutputLatencyModel m2;
+    m2.deviceName = "Mid Dev";
+    m2.sampleRate = 48000;
+    m2.wasapiStreamLatencyMs = 35.0;
+    m2.updateTotals();
+    std::vector<syncwave::OutputLatencyModel> triModels = { m0, m1, m2 };
+    // Clear offsets for pure SW test
+    triModels[0].optionalCalibrationOffsetMs = 0.0;
+    triModels[0].updateTotals();
+    auto triPlan = syncwave::SyncController::computeSoftwareAlignmentPlan(triModels);
+    TEST_ASSERT(triPlan.calculatedDelaysMs.size() == 3, "3 devices in tri-plan");
+    TEST_ASSERT(std::abs(triPlan.calculatedDelaysMs[0] - 40.0) < 0.001, "Dev0 gets 40ms");
+    TEST_ASSERT(std::abs(triPlan.calculatedDelaysMs[1] - 0.0) < 0.001, "Dev1 gets 0ms (slowest)");
+    TEST_ASSERT(std::abs(triPlan.calculatedDelaysMs[2] - 25.0) < 0.001, "Dev2 gets 25ms (60 - 35)");
+}
+
+void testDeviceOutputDelayBufferIntegration() {
+    std::cout << "[TEST] DeviceOutput DelayBuffer Integration & Telemetry\n";
+
+    syncwave::AudioDevice dev{"dev-test", "Test Device", syncwave::DeviceState::Active, true, false};
+    syncwave::DeviceOutput out(dev);
+
+    TEST_ASSERT(out.initializeForTesting(48000, 2, 48000), "Initialized DeviceOutput for testing");
+    TEST_ASSERT(out.configuredDelayMs() == 0.0, "Initial delay ms is 0.0");
+    TEST_ASSERT(out.configuredDelayFrames() == 0, "Initial delay frames is 0");
+    TEST_ASSERT(out.syncState() == syncwave::SyncState::Disabled, "Initial sync state is Disabled");
+
+    // Set delay ms
+    out.setDelayMs(20.0);
+    TEST_ASSERT(out.configuredDelayMs() == 20.0, "Configured delay ms is 20.0");
+    TEST_ASSERT(out.configuredDelayFrames() == 960, "Configured delay frames @ 48kHz is 960");
+    TEST_ASSERT(out.syncState() == syncwave::SyncState::Manual, "Sync state changed to Manual");
+
+    // Set calibration offset
+    out.setCalibrationOffsetMs(15.0);
+    TEST_ASSERT(out.calibrationOffsetMs() == 15.0, "Calibration offset is 15.0 ms");
+
+    // Latency model query
+    auto model = out.getLatencyModel();
+    TEST_ASSERT(model.configuredDelayMs == 20.0, "Latency model reflects configuredDelayMs");
+    TEST_ASSERT(model.appliedDelayFrames == 960, "Latency model reflects appliedDelayFrames");
+    TEST_ASSERT(model.optionalCalibrationOffsetMs == 15.0, "Latency model reflects calibration offset");
+    TEST_ASSERT(model.effectiveLatencyMs >= 15.0, "Effective latency includes calibration offset");
+
+    // Telemetry query
+    auto tele = out.getTelemetry();
+    TEST_ASSERT(tele.syncState == syncwave::SyncState::Manual, "Telemetry sync state matches");
+    TEST_ASSERT(tele.latencyModel.configuredDelayMs == 20.0, "Telemetry latency model configured delay matches");
+}
+
+void testOutputRouterSyncPlanIntegration() {
+    std::cout << "[TEST] OutputRouter Delay & SyncPlan Integration\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"dev-1", "Endpoint 1", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"dev-2", "Endpoint 2", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+    TEST_ASSERT(router.initializeOutputsForTesting(48000, 2), "Initialized outputs for testing");
+
+    auto models = router.getLatencyModels();
+    TEST_ASSERT(models.size() == 2, "Router returned 2 latency models");
+
+    // Test individual router delay setters
+    router.setDeviceDelayMs(0, 30.0);
+    router.setDeviceDelayFrames(1, 1440); // 30ms @ 48kHz
+    auto* out0 = router.getOutput(0);
+    auto* out1 = router.getOutput(1);
+    TEST_ASSERT(out0->configuredDelayMs() == 30.0, "Output 0 delay set to 30.0 ms");
+    TEST_ASSERT(out1->configuredDelayFrames() == 1440, "Output 1 delay set to 1440 frames");
+
+    // Test applying an alignment plan
+    syncwave::SyncPlan plan;
+    plan.targetLatencyMs = 50.0;
+    plan.calculatedDelaysMs = { 20.0, 10.0 };
+    plan.calculatedDelaysFrames = { 960, 480 };
+    plan.syncState = syncwave::SyncState::SoftwareCalibrated;
+    plan.isValid = true;
+
+    router.applySyncPlan(plan);
+    TEST_ASSERT(out0->configuredDelayMs() == 20.0, "Output 0 received plan delay 20.0 ms");
+    TEST_ASSERT(out1->configuredDelayMs() == 10.0, "Output 1 received plan delay 10.0 ms");
+    TEST_ASSERT(out0->syncState() == syncwave::SyncState::SoftwareCalibrated, "Output 0 sync state updated to SoftwareCalibrated");
+    TEST_ASSERT(out1->syncState() == syncwave::SyncState::SoftwareCalibrated, "Output 1 sync state updated to SoftwareCalibrated");
+
+    router.closeOutputs();
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 8)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 9)   \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -1760,6 +2046,14 @@ int main() {
     testDeviceOutputPlayheadEstimation();
     testSyncPulseGenerator();
     testOutputRouterMultiWindowPairwise();
+
+    // Milestone 9 Tests
+    testDelayBufferBasics();
+    testDelayBufferIntegrityAndWraparound();
+    testOutputLatencyModel();
+    testSyncControllerAlignmentMath();
+    testDeviceOutputDelayBufferIntegration();
+    testOutputRouterSyncPlanIntegration();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

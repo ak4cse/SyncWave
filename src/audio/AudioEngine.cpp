@@ -92,6 +92,8 @@ bool AudioEngine::startTone(const std::vector<AudioDevice>& devices, const ToneP
         return false;
     }
 
+    applyPendingSync();
+
     // Pre-fill bus with ~100ms of initial audio
     size_t prefillFrames = masterFmt.sampleRate / 10;
     std::vector<float> prefill(prefillFrames * masterFmt.channels);
@@ -150,6 +152,8 @@ bool AudioEngine::startPulse(const std::vector<AudioDevice>& devices, const Puls
         router_.closeOutputs();
         return false;
     }
+
+    applyPendingSync();
 
     if (!router_.startOutputs()) {
         stop();
@@ -223,6 +227,8 @@ bool AudioEngine::startCapture(const AudioDevice& captureDevice, const std::vect
         router_.closeOutputs();
         return false;
     }
+
+    applyPendingSync();
 
     // 4. Start all outputs
     if (!router_.startOutputs()) {
@@ -326,13 +332,58 @@ EngineDiagnostics AudioEngine::getDiagnostics() const {
     diag.busAvailableFrames = masterBus_.availableFrames();
     diag.busFramesWritten = masterBus_.totalFramesWritten();
     diag.busFramesRead = masterBus_.totalFramesRead();
-    diag.busUnderruns = masterBus_.underruns();
-    diag.busOverruns = masterBus_.overruns();
+    diag.latencyModels = router_.getLatencyModels();
+    diag.activeSyncPlan = activeSyncPlan_;
+    if (!diag.outputs.empty()) {
+        diag.syncState = diag.outputs[0].syncState;
+    }
 
     diag.isRunning = isRunning();
     diag.isCaptureMode = isCaptureMode_;
 
     return diag;
+}
+
+void AudioEngine::setManualDelays(const std::vector<double>& delaysMs) {
+    autoSyncRequested_ = false;
+    pendingManualDelays_ = delaysMs;
+    auto models = router_.getLatencyModels();
+    activeSyncPlan_ = SyncController::computeManualPlan(models, delaysMs);
+    router_.applySyncPlan(activeSyncPlan_);
+}
+
+void AudioEngine::setCalibrationOffsets(const std::vector<double>& offsetsMs) {
+    pendingCalibrationOffsets_ = offsetsMs;
+    for (size_t i = 0; i < offsetsMs.size(); ++i) {
+        router_.setDeviceCalibrationOffsetMs(i, offsetsMs[i]);
+    }
+}
+
+SyncPlan AudioEngine::alignSoftwareLatencies() {
+    autoSyncRequested_ = true;
+    router_.sampleAllClocks();
+    auto models = router_.getLatencyModels();
+    activeSyncPlan_ = SyncController::computeSoftwareAlignmentPlan(models);
+    if (activeSyncPlan_.isValid) {
+        router_.applySyncPlan(activeSyncPlan_);
+    }
+    return activeSyncPlan_;
+}
+
+void AudioEngine::applyPendingSync() {
+    for (size_t i = 0; i < pendingCalibrationOffsets_.size(); ++i) {
+        router_.setDeviceCalibrationOffsetMs(i, pendingCalibrationOffsets_[i]);
+    }
+
+    if (!pendingManualDelays_.empty()) {
+        auto models = router_.getLatencyModels();
+        activeSyncPlan_ = SyncController::computeManualPlan(models, pendingManualDelays_);
+        router_.applySyncPlan(activeSyncPlan_);
+    } else if (autoSyncRequested_) {
+        activeSyncPlan_ = alignSoftwareLatencies();
+    } else {
+        router_.setSyncStateAll(SyncState::Disabled);
+    }
 }
 
 } // namespace syncwave

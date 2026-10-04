@@ -331,3 +331,58 @@ To ensure safety:
    - Physical acoustic emission includes external physical delays (Bluetooth A2DP transport packetization, RF buffering, hardware DAC delay, and acoustic travel time).
    - Direct measurement of physical acoustic latency requires an external calibrated microphone feedback loop or oscilloscope probe.
 
+---
+
+## 9. Milestone 9: Fixed Software-Domain Output Alignment & Per-Output Delay Stage
+
+### Component Hierarchy
+```text
+                     [AudioEngine] / [CLI Commands]
+                                   |
+                  +----------------+----------------+
+                  |                                 |
+                  v                                 v
+         [SyncController]                  [syncwave calibrate]
+         +--------------------------+      +--------------------------+
+         | calculateTargetLatency() |      | Probe Endpoint Latencies |
+         | calculateDeviceDelay()   |      | Print Latency Breakdown  |
+         | computeSoftwarePlan()    |      | Print Acoustic Disclaimer|
+         | computeManualPlan()      |      +--------------------------+
+         +--------------------------+
+                  |
+                  | applySyncPlan()
+                  v
+            [OutputRouter]
+           /              \
+          v                v
+   [DeviceOutput 1] [DeviceOutput 2]
+   +--------------+ +--------------+
+   | SPSC Queue   | | SPSC Queue   | (Canonical 48.0 kHz)
+   | Resampler    | | Resampler    | (48.0 kHz -> f_dev)
+   | DelayBuffer  | | DelayBuffer  | (f_dev Native Frames, Circular, RT-Safe)
+   | WASAPIClient | | WASAPIClient | (f_dev Hardware Render)
+   +--------------+ +--------------+
+```
+
+### Key Subsystems
+1. **`DelayBuffer`**:
+   - Placed **after** resampling at native device sample rates ($f_{\text{dev}}$).
+   - Circular float buffer for interleaved stereo PCM with initial silence prefill.
+   - Atomic lock-free `delayFrames_` parameter update for real-time safety.
+   - Zero allocation and constant-time execution in steady state; zero-delay passthrough optimization.
+2. **`OutputLatencyModel`**:
+   - Latency taxonomy: $L_{\text{stream}}$, $L_{\text{pad}}$, $L_{\text{queue}}$, $L_{\text{resamp}}$, $L_{\text{delay}}$, and $L_{\text{cal}}$.
+   - Estimated software latency: $L_{\text{sw}} = L_{\text{stream}} + L_{\text{pad}} + L_{\text{queue}} + L_{\text{resamp}}$.
+   - Effective latency: $L_{\text{eff}} = L_{\text{sw}} + L_{\text{cal}}$.
+   - Synchronization state tracking: `Disabled`, `Manual`, `SoftwareCalibrated`, `PhysicallyCalibrated`, `Uncertain`.
+3. **`SyncController`**:
+   - Slowest path baseline: $T_{\text{target}} = \max_i(L_{\text{eff}, i})$.
+   - Compensation delay: $D_i = \max(0.0, T_{\text{target}} - L_{\text{eff}, i})$.
+   - Frame conversion at native device rate: $D_{\text{frames}, i} = \text{round}(D_i \times f_{\text{dev}, i} / 1000)$.
+4. **CLI Commands & Delay Options**:
+   - `syncwave calibrate`: Probes endpoints, computes alignment plan, prints breakdown table, and details acoustic disclaimer.
+   - `--delay <d0,d1>`: Explicit per-output manual delays in ms.
+   - `--sync software`: Automatic software-domain alignment.
+   - `--offsets <o0,o1>`: Manual physical calibration offsets.
+
+

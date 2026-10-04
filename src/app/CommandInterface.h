@@ -25,6 +25,7 @@ private:
     int handleCaptureCommand(const std::vector<std::string>& args);
     int handleClockTestCommand(const std::vector<std::string>& args);
     int handleLatencyTestCommand(const std::vector<std::string>& args);
+    int handleCalibrateCommand(const std::vector<std::string>& args);
     int handleStatusCommand(const std::vector<std::string>& args);
 
     std::unique_ptr<DeviceManager> deviceManager_;

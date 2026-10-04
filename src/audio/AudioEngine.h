@@ -52,6 +52,9 @@ struct EngineDiagnostics {
     uint64_t routerFramesDistributed = 0;
     std::vector<DeviceOutputTelemetry> outputs;
     std::vector<PairwiseDriftEstimate> pairwiseDrift;
+    std::vector<OutputLatencyModel> latencyModels;
+    SyncPlan activeSyncPlan;
+    SyncState syncState = SyncState::Disabled;
 
     bool isRunning = false;
     bool isCaptureMode = false;
@@ -95,6 +98,14 @@ public:
     // Stop playback/capture and threads
     void stop();
 
+    // Synchronization methods
+    void setManualDelays(const std::vector<double>& delaysMs);
+    void setCalibrationOffsets(const std::vector<double>& offsetsMs);
+    void requestAutoSync(bool enable = true) { autoSyncRequested_ = enable; }
+    SyncPlan alignSoftwareLatencies();
+    [[nodiscard]] const SyncController& syncController() const { return syncController_; }
+    [[nodiscard]] const SyncPlan& activeSyncPlan() const { return activeSyncPlan_; }
+
     [[nodiscard]] bool isRunning() const;
     [[nodiscard]] EngineDiagnostics getDiagnostics() const;
     [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimatesOverWindow(double windowSec) const;
@@ -104,6 +115,7 @@ public:
 
 private:
     void producerLoop();
+    void applyPendingSync();
 
     std::unique_ptr<WasapiCapture> capture_;
     ToneGenerator toneGen_;
@@ -111,6 +123,12 @@ private:
     MasterAudioBus masterBus_;
     OutputRouter router_;
     ToneParameters currentParams_;
+    SyncController syncController_;
+
+    std::vector<double> pendingManualDelays_;
+    std::vector<double> pendingCalibrationOffsets_;
+    bool autoSyncRequested_ = false;
+    SyncPlan activeSyncPlan_{};
 
     std::thread producerThread_;
     std::atomic<bool> producerRunning_{false};

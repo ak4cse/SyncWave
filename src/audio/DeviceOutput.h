@@ -6,6 +6,8 @@
 #include "../windows/DeviceManager.h"
 #include "../windows/WasapiOutput.h"
 #include "../sync/DeviceClock.h"
+#include "../sync/DelayBuffer.h"
+#include "../sync/OutputLatencyModel.h"
 #include <string>
 #include <memory>
 #include <atomic>
@@ -43,6 +45,10 @@ struct DeviceOutputTelemetry {
     double playheadDiscrepancyMs = 0.0;
     uint64_t masterTimelineFrames = 0;
     double masterTimelineSec = 0.0;
+    OutputLatencyModel latencyModel;
+    double configuredDelayMs = 0.0;
+    size_t appliedDelayFrames = 0;
+    SyncState syncState = SyncState::Disabled;
     bool isAvailable = true;
 };
 
@@ -100,6 +106,22 @@ public:
     [[nodiscard]] uint64_t masterTimelineFrames() const;
     [[nodiscard]] double masterTimelineSeconds() const;
 
+    // Delay and latency compensation methods
+    void setDelayMs(double delayMs);
+    void setDelayFrames(size_t frames);
+    [[nodiscard]] double configuredDelayMs() const;
+    [[nodiscard]] size_t configuredDelayFrames() const;
+
+    void setCalibrationOffsetMs(double offsetMs);
+    [[nodiscard]] double calibrationOffsetMs() const;
+
+    void setSyncState(SyncState state);
+    [[nodiscard]] SyncState syncState() const;
+
+    [[nodiscard]] OutputLatencyModel getLatencyModel() const;
+    [[nodiscard]] DelayBuffer* delayBuffer() { return delayBuffer_.get(); }
+    [[nodiscard]] const DelayBuffer* delayBuffer() const { return delayBuffer_.get(); }
+
     [[nodiscard]] DeviceOutputTelemetry getTelemetry() const;
 
 private:
@@ -111,7 +133,12 @@ private:
     std::unique_ptr<WasapiOutput> wasapiOutput_;
     std::unique_ptr<RingBuffer> queue_;
     std::unique_ptr<Resampler> resampler_;
+    std::unique_ptr<DelayBuffer> delayBuffer_;
     DeviceClock clock_;
+
+    std::vector<float> renderScratch_; // Preallocated buffer to eliminate allocations in render callback
+    std::atomic<double> calibrationOffsetMs_{0.0};
+    std::atomic<SyncState> syncState_{SyncState::Disabled};
 
     std::atomic<uint64_t> framesRouted_{0};
     std::atomic<uint64_t> framesConsumed_{0};

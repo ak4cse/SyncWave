@@ -36,6 +36,13 @@ bool DeviceOutput::initialize(uint32_t masterSampleRate, uint32_t masterChannels
     // Dedicated output resampler (master sample rate -> device sample rate)
     resampler_ = std::make_unique<Resampler>(masterSampleRate_, format_.sampleRate, masterChannels_);
 
+    // Dedicated delay buffer: up to 5.0 seconds at device sample rate
+    const size_t delayCapacity = format_.sampleRate * 5;
+    delayBuffer_ = std::make_unique<DelayBuffer>(delayCapacity);
+
+    // Preallocated render scratch buffer (8192 frames stereo) to ensure zero allocations in callback
+    renderScratch_.assign(8192 * format_.channels, 0.0f);
+
     clock_ = DeviceClock(device_.id, format_.sampleRate);
 
     framesRouted_.store(0, std::memory_order_relaxed);
@@ -65,6 +72,10 @@ bool DeviceOutput::initializeForTesting(uint32_t masterSampleRate, uint32_t mast
     queue_ = std::make_unique<RingBuffer>(queueCapacity, masterChannels_);
     resampler_ = std::make_unique<Resampler>(masterSampleRate_, format_.sampleRate, masterChannels_);
 
+    const size_t delayCapacity = format_.sampleRate * 5;
+    delayBuffer_ = std::make_unique<DelayBuffer>(delayCapacity);
+    renderScratch_.assign(8192 * format_.channels, 0.0f);
+
     clock_ = DeviceClock(device_.id, format_.sampleRate);
 
     framesRouted_.store(0, std::memory_order_relaxed);
@@ -84,18 +95,33 @@ bool DeviceOutput::start() {
 
     bool started = wasapiOutput_->start([this](uint8_t* destinationBuffer, uint32_t frameCount, const AudioFormat& outFormat) {
         float* dest = reinterpret_cast<float*>(destinationBuffer);
+        const uint32_t channels = outFormat.channels > 0 ? outFormat.channels : 2;
+
+        if (renderScratch_.size() < frameCount * channels) {
+            renderScratch_.resize(frameCount * channels, 0.0f);
+        }
+        float* intermediate = renderScratch_.data();
+
         if (masterSampleRate_ == outFormat.sampleRate) {
-            size_t readCount = queue_->read(dest, frameCount);
+            size_t readCount = queue_->read(intermediate, frameCount);
             framesConsumed_.fetch_add(readCount, std::memory_order_relaxed);
             if (readCount < frameCount) {
+                std::fill(intermediate + (readCount * channels), intermediate + (frameCount * channels), 0.0f);
                 queueUnderruns_.fetch_add(frameCount - readCount, std::memory_order_relaxed);
             }
         } else {
-            size_t produced = resampler_->pull(*queue_, dest, frameCount);
+            size_t produced = resampler_->pull(*queue_, intermediate, frameCount);
             framesResampled_.fetch_add(produced, std::memory_order_relaxed);
             if (produced < frameCount) {
+                std::fill(intermediate + (produced * channels), intermediate + (frameCount * channels), 0.0f);
                 queueUnderruns_.fetch_add(frameCount - produced, std::memory_order_relaxed);
             }
+        }
+
+        if (delayBuffer_) {
+            delayBuffer_->process(intermediate, dest, frameCount);
+        } else {
+            std::memcpy(dest, intermediate, frameCount * channels * sizeof(float));
         }
     });
 
@@ -118,6 +144,9 @@ void DeviceOutput::close() {
     }
     if (resampler_) {
         resampler_->resetState();
+    }
+    if (delayBuffer_) {
+        delayBuffer_->reset();
     }
 }
 
@@ -229,6 +258,11 @@ DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
                               ? (static_cast<double>(t.masterTimelineFrames) / masterSampleRate_)
                               : 0.0;
 
+    t.latencyModel = getLatencyModel();
+    t.configuredDelayMs = t.latencyModel.configuredDelayMs;
+    t.appliedDelayFrames = t.latencyModel.appliedDelayFrames;
+    t.syncState = t.latencyModel.syncState;
+
     return t;
 }
 
@@ -280,6 +314,77 @@ uint64_t DeviceOutput::masterTimelineFrames() const {
 double DeviceOutput::masterTimelineSeconds() const {
     if (masterSampleRate_ == 0) return 0.0;
     return static_cast<double>(masterTimelineFrames()) / static_cast<double>(masterSampleRate_);
+}
+
+void DeviceOutput::setDelayMs(double delayMs) {
+    if (delayBuffer_) {
+        uint32_t sRate = format_.sampleRate > 0 ? format_.sampleRate : 48000;
+        delayBuffer_->setDelayMs(delayMs, sRate);
+        syncState_.store(SyncState::Manual, std::memory_order_relaxed);
+    }
+}
+
+void DeviceOutput::setDelayFrames(size_t frames) {
+    if (delayBuffer_) {
+        delayBuffer_->setDelayFrames(frames);
+        syncState_.store(SyncState::Manual, std::memory_order_relaxed);
+    }
+}
+
+double DeviceOutput::configuredDelayMs() const {
+    if (delayBuffer_) {
+        uint32_t sRate = format_.sampleRate > 0 ? format_.sampleRate : 48000;
+        return delayBuffer_->delayMs(sRate);
+    }
+    return 0.0;
+}
+
+size_t DeviceOutput::configuredDelayFrames() const {
+    return delayBuffer_ ? delayBuffer_->delayFrames() : 0;
+}
+
+void DeviceOutput::setCalibrationOffsetMs(double offsetMs) {
+    calibrationOffsetMs_.store(offsetMs, std::memory_order_relaxed);
+}
+
+double DeviceOutput::calibrationOffsetMs() const {
+    return calibrationOffsetMs_.load(std::memory_order_relaxed);
+}
+
+void DeviceOutput::setSyncState(SyncState state) {
+    syncState_.store(state, std::memory_order_relaxed);
+}
+
+SyncState DeviceOutput::syncState() const {
+    return syncState_.load(std::memory_order_relaxed);
+}
+
+OutputLatencyModel DeviceOutput::getLatencyModel() const {
+    OutputLatencyModel model;
+    model.deviceId = device_.id;
+    model.deviceName = device_.name;
+    model.sampleRate = format_.sampleRate > 0 ? format_.sampleRate : 48000;
+
+    auto snap = clock_.latestSample();
+    if (snap) {
+        model.wasapiStreamLatencyMs = snap->streamLatencyMs();
+        model.wasapiPaddingMs = snap->paddingMs();
+    }
+    if (queue_) {
+        size_t avail = queue_->availableToRead();
+        model.queueLatencyMs = (masterSampleRate_ > 0) ? (static_cast<double>(avail) * 1000.0 / masterSampleRate_) : 0.0;
+    }
+    if (resampler_ && masterSampleRate_ != format_.sampleRate) {
+        model.resamplerLatencyMs = (format_.sampleRate > 0) ? (0.5 * 1000.0 / format_.sampleRate) : 0.0;
+    }
+    if (delayBuffer_) {
+        model.configuredDelayMs = delayBuffer_->delayMs(model.sampleRate);
+        model.appliedDelayFrames = delayBuffer_->delayFrames();
+    }
+    model.optionalCalibrationOffsetMs = calibrationOffsetMs_.load(std::memory_order_relaxed);
+    model.syncState = syncState_.load(std::memory_order_relaxed);
+    model.updateTotals();
+    return model;
 }
 
 } // namespace syncwave

@@ -18,7 +18,7 @@
 
 namespace syncwave {
 
-constexpr const char* SYNCWAVE_VERSION = "0.8.0-alpha";
+constexpr const char* SYNCWAVE_VERSION = "0.9.0-alpha";
 
 static std::atomic<bool> g_stopRequested{false};
 
@@ -42,6 +42,20 @@ static std::vector<std::string> splitString(const std::string& str, char delim) 
     return tokens;
 }
 
+static std::vector<double> parseDoubleList(const std::string& str) {
+    auto tokens = splitString(str, ',');
+    std::vector<double> vals;
+    vals.reserve(tokens.size());
+    for (const auto& t : tokens) {
+        try {
+            vals.push_back(std::stod(t));
+        } catch (...) {
+            vals.push_back(0.0);
+        }
+    }
+    return vals;
+}
+
 CommandInterface::CommandInterface()
     : deviceManager_(std::make_unique<DeviceManager>()),
       audioEngine_(std::make_unique<AudioEngine>()) {}
@@ -59,6 +73,7 @@ void CommandInterface::printHelp() const {
               << "  syncwave watch [--timeout <sec>]           Monitor audio endpoint changes in real time\n"
               << "  syncwave tone [options]                    Play synthetic PCM sine wave through Master Audio Bus\n"
               << "  syncwave capture [options]                 Capture Windows system audio via WASAPI Loopback and route to outputs\n"
+              << "  syncwave calibrate [options]               Measure software latencies and compute alignment delay plan\n"
               << "  syncwave clock-test [options]              Run high-precision 60s clock drift and stability experiment\n"
               << "  syncwave latency-test [options]            Run deterministic transient pulse test to evaluate software latency\n"
               << "  syncwave status                            Display engine, router, and master audio bus status\n"
@@ -68,18 +83,30 @@ void CommandInterface::printHelp() const {
               << "  --source, -s <index|id>                    Capture endpoint (default: system default)\n"
               << "  --output, -o <index|id>                    Output endpoint (can be repeated for multiple outputs)\n"
               << "  --outputs, -O <id1,id2,...>                Comma-separated list of output endpoints\n"
+              << "  --delay <ms1,ms2,...|ms>                   Per-output or default delay in milliseconds\n"
+              << "  --sync <none|software>                     Automatic software latency alignment mode\n"
+              << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n"
               << "  --duration, -t <sec>                       Duration in seconds (0 = continuous, default: 5s)\n\n"
               << "Options for 'tone':\n"
               << "  --device, -d, -o <index|id>                Target output endpoint (can be repeated for multiple outputs)\n"
               << "  --outputs, -O <id1,id2,...>                Comma-separated list of target output endpoints\n"
               << "  --frequency, -f <Hz>                       Tone frequency in Hz (default: 440 Hz)\n"
+              << "  --delay <ms1,ms2,...|ms>                   Per-output or default delay in milliseconds\n"
+              << "  --sync <none|software>                     Automatic software latency alignment mode\n"
+              << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n"
               << "  --duration, -t <sec>                       Playback duration in seconds (0 = continuous, default: 5s)\n"
               << "  --volume, -v <0.0..1.0>                    Volume amplitude level (default: 0.25)\n\n"
+              << "Options for 'calibrate':\n"
+              << "  --outputs, -O <id1,id2,...>                Target output endpoints (default: first two active endpoints)\n"
+              << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n\n"
               << "Options for 'clock-test':\n"
               << "  --outputs, -O <id1,id2,...>                Target output endpoints (default: first two active endpoints)\n"
               << "  --duration, -t <sec>                       Duration in seconds (default: 60s)\n\n"
               << "Options for 'latency-test':\n"
               << "  --outputs, -O <id1,id2,...>                Target output endpoints (default: first two active endpoints)\n"
+              << "  --delay <ms1,ms2,...|ms>                   Per-output or default delay in milliseconds\n"
+              << "  --sync <none|software>                     Automatic software latency alignment mode\n"
+              << "  --offsets <ms1,ms2,...>                    Optional manual physical calibration offsets in ms\n"
               << "  --runs, -n <count>                         Number of repeated test runs (default: 5)\n\n";
 }
 
@@ -274,6 +301,15 @@ static void printOutputTelemetry(const std::vector<DeviceOutputTelemetry>& outpu
         } else {
             std::cout << "      Estimated rate:   accumulating (" << out.clockSampleCount << " samples)\n";
         }
+        std::cout << "      Sync state:       " << syncStateToString(out.syncState) << "\n";
+        std::cout << "      Configured delay: " << out.latencyModel.configuredDelayMs << " ms ("
+                  << out.latencyModel.appliedDelayFrames << " frames)\n";
+        if (out.latencyModel.optionalCalibrationOffsetMs != 0.0) {
+            std::cout << "      Calibration off:  " << (out.latencyModel.optionalCalibrationOffsetMs >= 0.0 ? "+" : "")
+                      << out.latencyModel.optionalCalibrationOffsetMs << " ms\n";
+        }
+        std::cout << "      Est. SW latency:  " << out.latencyModel.estimatedSoftwareLatencyMs << " ms\n";
+        std::cout << "      Effective latency:" << out.latencyModel.effectiveLatencyMs << " ms\n";
         std::cout << "\n";
     }
 
@@ -340,6 +376,9 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
     double frequency = 440.0;
     double duration = 5.0;
     double volume = 0.25;
+    std::string delayStr;
+    std::string syncMode;
+    std::string offsetsStr;
 
     for (size_t i = 0; i < args.size(); ++i) {
         if ((args[i] == "--device" || args[i] == "-d" || args[i] == "--output" || args[i] == "-o") && i + 1 < args.size()) {
@@ -353,6 +392,12 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
             try { duration = std::stod(args[++i]); } catch (...) {}
         } else if ((args[i] == "--volume" || args[i] == "-v") && i + 1 < args.size()) {
             try { volume = std::stod(args[++i]); } catch (...) {}
+        } else if (args[i] == "--delay" && i + 1 < args.size()) {
+            delayStr = args[++i];
+        } else if (args[i] == "--sync" && i + 1 < args.size()) {
+            syncMode = args[++i];
+        } else if (args[i] == "--offsets" && i + 1 < args.size()) {
+            offsetsStr = args[++i];
         }
     }
 
@@ -389,6 +434,22 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
                 return 1;
             }
             targetDevs.push_back(*dev);
+        }
+    }
+
+    if (!delayStr.empty()) {
+        auto delays = parseDoubleList(delayStr);
+        audioEngine_->setManualDelays(delays);
+    }
+    if (!offsetsStr.empty()) {
+        auto offsets = parseDoubleList(offsetsStr);
+        audioEngine_->setCalibrationOffsets(offsets);
+    }
+    if (!syncMode.empty()) {
+        if (syncMode == "software" || syncMode == "auto") {
+            audioEngine_->alignSoftwareLatencies();
+        } else if (syncMode == "none" || syncMode == "off") {
+            audioEngine_->setManualDelays({});
         }
     }
 
@@ -496,6 +557,9 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
     std::string sourceSelector;
     std::vector<std::string> outputSelectors;
     double duration = 5.0;
+    std::string delayStr;
+    std::string syncMode;
+    std::string offsetsStr;
 
     for (size_t i = 0; i < args.size(); ++i) {
         if ((args[i] == "--source" || args[i] == "-s") && i + 1 < args.size()) {
@@ -507,6 +571,12 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
             outputSelectors.insert(outputSelectors.end(), items.begin(), items.end());
         } else if ((args[i] == "--duration" || args[i] == "-t") && i + 1 < args.size()) {
             try { duration = std::stod(args[++i]); } catch (...) {}
+        } else if (args[i] == "--delay" && i + 1 < args.size()) {
+            delayStr = args[++i];
+        } else if (args[i] == "--sync" && i + 1 < args.size()) {
+            syncMode = args[++i];
+        } else if (args[i] == "--offsets" && i + 1 < args.size()) {
+            offsetsStr = args[++i];
         }
     }
 
@@ -549,6 +619,22 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
                 return 1;
             }
             outputDevs.push_back(*dev);
+        }
+    }
+
+    if (!delayStr.empty()) {
+        auto delays = parseDoubleList(delayStr);
+        audioEngine_->setManualDelays(delays);
+    }
+    if (!offsetsStr.empty()) {
+        auto offsets = parseDoubleList(offsetsStr);
+        audioEngine_->setCalibrationOffsets(offsets);
+    }
+    if (!syncMode.empty()) {
+        if (syncMode == "software" || syncMode == "auto") {
+            audioEngine_->alignSoftwareLatencies();
+        } else if (syncMode == "none" || syncMode == "off") {
+            audioEngine_->setManualDelays({});
         }
     }
 
@@ -844,6 +930,9 @@ int CommandInterface::handleClockTestCommand(const std::vector<std::string>& arg
 int CommandInterface::handleLatencyTestCommand(const std::vector<std::string>& args) {
     std::vector<std::string> outputSpecs;
     int numRuns = 5;
+    std::string delayStr;
+    std::string syncMode;
+    std::string offsetsStr;
 
     for (size_t i = 0; i < args.size(); ++i) {
         if ((args[i] == "--outputs" || args[i] == "-O") && i + 1 < args.size()) {
@@ -854,6 +943,12 @@ int CommandInterface::handleLatencyTestCommand(const std::vector<std::string>& a
         } else if ((args[i] == "--runs" || args[i] == "-n") && i + 1 < args.size()) {
             numRuns = std::stoi(args[++i]);
             if (numRuns < 1) numRuns = 1;
+        } else if (args[i] == "--delay" && i + 1 < args.size()) {
+            delayStr = args[++i];
+        } else if (args[i] == "--sync" && i + 1 < args.size()) {
+            syncMode = args[++i];
+        } else if (args[i] == "--offsets" && i + 1 < args.size()) {
+            offsetsStr = args[++i];
         }
     }
 
@@ -901,7 +996,27 @@ int CommandInterface::handleLatencyTestCommand(const std::vector<std::string>& a
     std::cout << "\nSignal Specification:\n";
     std::cout << "  Type:              SyncPulseGenerator\n";
     std::cout << "  Structure:         500 ms silence -> 1 ms impulse (peak 1.0f) -> 500 ms silence\n";
-    std::cout << "  Repeated Runs:     " << numRuns << "\n\n";
+    std::cout << "  Repeated Runs:     " << numRuns << "\n";
+
+    if (!delayStr.empty()) {
+        auto delays = parseDoubleList(delayStr);
+        audioEngine_->setManualDelays(delays);
+        std::cout << "  Manual Delays:     " << delayStr << " ms\n";
+    }
+    if (!offsetsStr.empty()) {
+        auto offsets = parseDoubleList(offsetsStr);
+        audioEngine_->setCalibrationOffsets(offsets);
+        std::cout << "  Calibration Offs:  " << offsetsStr << " ms\n";
+    }
+    if (!syncMode.empty()) {
+        if (syncMode == "software" || syncMode == "auto") {
+            audioEngine_->alignSoftwareLatencies();
+            std::cout << "  Sync Mode:         Automatic Software Latency Alignment\n";
+        } else if (syncMode == "none" || syncMode == "off") {
+            audioEngine_->setManualDelays({});
+        }
+    }
+    std::cout << "\n";
 
     g_stopRequested.store(false);
     SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
@@ -1016,6 +1131,131 @@ int CommandInterface::handleLatencyTestCommand(const std::vector<std::string>& a
     return 0;
 }
 
+int CommandInterface::handleCalibrateCommand(const std::vector<std::string>& args) {
+    std::vector<std::string> outputSpecs;
+    std::string offsetsStr;
+
+    for (size_t i = 0; i < args.size(); ++i) {
+        if ((args[i] == "--outputs" || args[i] == "-O") && i + 1 < args.size()) {
+            auto tokens = splitString(args[++i], ',');
+            outputSpecs.insert(outputSpecs.end(), tokens.begin(), tokens.end());
+        } else if ((args[i] == "--output" || args[i] == "-o" || args[i] == "--device" || args[i] == "-d") && i + 1 < args.size()) {
+            outputSpecs.push_back(args[++i]);
+        } else if (args[i] == "--offsets" && i + 1 < args.size()) {
+            offsetsStr = args[++i];
+        }
+    }
+
+    auto activeDevices = deviceManager_->enumerateDevices(true);
+    if (activeDevices.empty()) {
+        std::cerr << "Error: No active audio output endpoints found for calibration.\n";
+        return 1;
+    }
+
+    std::vector<AudioDevice> targets;
+    if (outputSpecs.empty()) {
+        if (activeDevices.size() >= 2) {
+            targets.push_back(activeDevices[0]);
+            targets.push_back(activeDevices[1]);
+        } else {
+            targets.push_back(activeDevices[0]);
+        }
+    } else {
+        for (const auto& spec : outputSpecs) {
+            try {
+                size_t idx = std::stoul(spec);
+                if (idx < activeDevices.size()) {
+                    targets.push_back(activeDevices[idx]);
+                    continue;
+                }
+            } catch (...) {}
+            auto dev = deviceManager_->getDeviceById(spec);
+            if (dev) {
+                targets.push_back(*dev);
+            } else {
+                std::cerr << "Error: Unknown output device: " << spec << "\n";
+                return 1;
+            }
+        }
+    }
+
+    std::cout << "\nSyncWave Software Latency Calibration & Delay Assessment\n";
+    std::cout << "=========================================================\n\n";
+    std::cout << "Probing " << targets.size() << " target endpoint(s) for WASAPI stream & buffer latencies...\n";
+
+    ToneParameters params;
+    params.frequencyHz = 440.0;
+    params.volume = 0.0001; // nearly silent probe
+    params.durationSec = 0.5;
+
+    if (!audioEngine_->startTone(targets, params)) {
+        std::cerr << "Error: Failed to probe audio endpoints via AudioEngine.\n";
+        return 1;
+    }
+
+    // Allow WASAPI streams to initialize and buffer to fill
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    audioEngine_->sampleClocks();
+
+    auto models = audioEngine_->outputRouter().getLatencyModels();
+
+    if (!offsetsStr.empty()) {
+        auto offsets = parseDoubleList(offsetsStr);
+        for (size_t i = 0; i < models.size() && i < offsets.size(); ++i) {
+            models[i].optionalCalibrationOffsetMs = offsets[i];
+            models[i].recalculate();
+        }
+    }
+
+    auto plan = SyncController::computeSoftwareAlignmentPlan(models);
+
+    audioEngine_->stop();
+
+    std::cout << "\nDevice Latency Breakdown:\n";
+    std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+    std::cout << "  Idx Device Name               Rate (Hz)  WASAPI Stream  Padding (ms)  Resampler (ms)  Est. SW (ms)  Delay (ms)  Delay (frames)\n";
+    std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+
+    for (size_t i = 0; i < models.size(); ++i) {
+        const auto& m = models[i];
+        double delayMs = (i < plan.calculatedDelaysMs.size()) ? plan.calculatedDelaysMs[i] : 0.0;
+        size_t delayFrames = (i < plan.calculatedDelaysFrames.size()) ? plan.calculatedDelaysFrames[i] : 0;
+        std::string dName = m.deviceName;
+        if (dName.length() > 24) dName = dName.substr(0, 21) + "...";
+
+        std::cout << "  [" << i << "] "
+                  << std::left << std::setw(25) << dName
+                  << std::right << std::setw(10) << m.sampleRate << "  "
+                  << std::setw(12) << std::fixed << std::setprecision(2) << m.wasapiStreamLatencyMs << "  "
+                  << std::setw(12) << m.wasapiPaddingMs << "  "
+                  << std::setw(14) << m.resamplerLatencyMs << "  "
+                  << std::setw(12) << m.estimatedSoftwareLatencyMs << "  "
+                  << std::setw(10) << delayMs << "  "
+                  << std::setw(14) << delayFrames << "\n";
+    }
+    std::cout << "------------------------------------------------------------------------------------------------------------------------\n";
+    std::cout << "Target Alignment Latency: " << std::fixed << std::setprecision(2) << plan.targetLatencyMs << " ms\n";
+    std::cout << "Sync State:               " << syncStateToString(plan.syncState) << "\n\n";
+
+    std::cout << "=======================================================================\n";
+    std::cout << "               PHYSICAL / ACOUSTIC LATENCY DISCLAIMER                  \n";
+    std::cout << "=======================================================================\n";
+    std::cout << "1. WHAT IS COMPENSATED:\n";
+    std::cout << "   Software-domain delays: WASAPI stream latency buffer, current endpoint\n";
+    std::cout << "   padding, and linear-phase resampler group delay.\n";
+    std::cout << "2. WHAT IS NOT COMPENSATED AUTOMATICALLY:\n";
+    std::cout << "   Physical acoustic latency: Bluetooth A2DP transport packetization and\n";
+    std::cout << "   RF buffer, hardware DAC reconstruction filters, amplifier/driver latency,\n";
+    std::cout << "   and room acoustic propagation time.\n";
+    std::cout << "3. MANUAL ACOUSTIC OFFSET CALIBRATION:\n";
+    std::cout << "   To calibrate physical acoustic differences, measure arrival times with\n";
+    std::cout << "   an external microphone or transient test, and supply offsets via:\n";
+    std::cout << "     syncwave tone --outputs " << (outputSpecs.empty() ? "0,1" : outputSpecs[0])
+              << " --offsets <off0,off1>\n\n";
+
+    return 0;
+}
+
 int CommandInterface::run(int argc, char* argv[]) {
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
@@ -1042,6 +1282,8 @@ int CommandInterface::run(int argc, char* argv[]) {
         return handleClockTestCommand(subArgs);
     } else if (cmd == "latency-test") {
         return handleLatencyTestCommand(subArgs);
+    } else if (cmd == "calibrate" || cmd == "align") {
+        return handleCalibrateCommand(subArgs);
     } else if (cmd == "status" || cmd == "diag") {
         return handleStatusCommand(subArgs);
     } else if (cmd == "help" || cmd == "--help" || cmd == "-h") {

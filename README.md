@@ -67,9 +67,17 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - High-precision 60s clock experiment: `syncwave clock-test --outputs 2,3 --duration 60`
   - Deterministic transient latency experiment: `syncwave latency-test --outputs 2,3 --runs 5`
   - Honest physical acoustic latency assessment distinguishing software driver latency from physical acoustic emission.
-  - Expanded test suite: 422 passing automated unit and integration tests.
-- [ ] **Milestone 9 — DelayBuffer & Static Delay Alignment**
-- [ ] **Milestone 10 — Dynamic Drift Correction**
+- [x] **Milestone 9 — Fixed Software-Domain Output Alignment & Per-Output Delay Stage**
+  - Per-output circular delay lines (`DelayBuffer`) placed **after** resampling at native device sample rates ($f_{\text{dev}}$).
+  - Preallocated stereo Float32 circular buffer with initial silence prefill; lock-free atomic `delayFrames_` updates; zero allocation in audio callback.
+  - Audited latency taxonomy (`OutputLatencyModel`): stream latency, mixer padding, queue latency, resampler group delay, configured delay, and manual calibration offsets.
+  - Synchronization engine (`SyncController`) aligning all endpoints to the slowest path ($T_{\text{target}} = \max_i(L_i)$, $D_i = T_{\text{target}} - L_i$).
+  - Explicit synchronization states (`Disabled`, `Manual`, `SoftwareCalibrated`, `PhysicallyCalibrated`, `Uncertain`).
+  - New CLI subcommand: `syncwave calibrate [--outputs <indices|ids>] [--offsets <o0,o1,...>]`
+  - Delay configuration flags across playback commands: `--delay <d0,d1,...>`, `--sync <software|manual|none>`, `--offsets <o0,o1,...>`
+  - Explicit physical acoustic latency disclaimers distinguishing software driver buffers from Bluetooth A2DP RF transport, DAC filters, and speaker acoustics.
+  - Expanded test suite: 494 passing automated unit and integration tests.
+- [ ] **Milestone 10 — Dynamic Drift Correction & Micro-Resampling**
 - [ ] **Milestone 11 — Automatic Calibration**
 
 ---
@@ -159,6 +167,27 @@ cmake --build build --config Release
 ```powershell
 # Run 5 repeated impulse runs to evaluate software-path latency repeatability
 .\build\syncwave.exe latency-test --outputs 2,3 --runs 5
+```
+
+### Software Latency Calibration & Delay Assessment
+```powershell
+# Probe target endpoints and compute automatic software delay compensation
+.\build\syncwave.exe calibrate --outputs 2,3
+
+# Probe endpoints with manual acoustic calibration offsets (in milliseconds)
+.\build\syncwave.exe calibrate --outputs 2,3 --offsets 0,50
+```
+
+### Playback with Delay Alignment
+```powershell
+# Play test tone with automatic software latency alignment
+.\build\syncwave.exe tone --outputs 2,3 --sync software --duration 5
+
+# Play test tone with explicit manual delays (e.g. 50ms on device 0, 0ms on device 1)
+.\build\syncwave.exe tone --outputs 2,3 --delay 50,0 --duration 5
+
+# Stream system audio loopback with manual delays
+.\build\syncwave.exe capture --source 3 --outputs 2,3 --delay 50,0 --duration 10
 ```
 
 ### Check Status & Telemetry

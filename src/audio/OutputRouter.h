@@ -3,6 +3,7 @@
 #include "DeviceOutput.h"
 #include "MasterAudioBus.h"
 #include "../sync/DriftEstimator.h"
+#include "../sync/SyncController.h"
 #include <vector>
 #include <memory>
 #include <string>
@@ -71,6 +72,14 @@ public:
 
     // Pairwise clock rate and drift estimation over a specific trailing time window
     [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimatesOverWindow(double windowSec) const;
+
+    // Latency and synchronization methods
+    [[nodiscard]] std::vector<OutputLatencyModel> getLatencyModels() const;
+    void setDeviceDelayMs(size_t index, double delayMs);
+    void setDeviceDelayFrames(size_t index, size_t frames);
+    void setDeviceCalibrationOffsetMs(size_t index, double offsetMs);
+    void setSyncStateAll(SyncState state);
+    void applySyncPlan(const SyncPlan& plan);
 
     [[nodiscard]] bool allRunning() const;
     [[nodiscard]] bool anyRunning() const;

@@ -266,4 +266,57 @@ std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimatesOverWi
     return results;
 }
 
+std::vector<OutputLatencyModel> OutputRouter::getLatencyModels() const {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    std::vector<OutputLatencyModel> models;
+    models.reserve(outputs_.size());
+    for (const auto& out : outputs_) {
+        if (out) {
+            models.push_back(out->getLatencyModel());
+        }
+    }
+    return models;
+}
+
+void OutputRouter::setDeviceDelayMs(size_t index, double delayMs) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    if (index < outputs_.size() && outputs_[index]) {
+        outputs_[index]->setDelayMs(delayMs);
+    }
+}
+
+void OutputRouter::setDeviceDelayFrames(size_t index, size_t frames) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    if (index < outputs_.size() && outputs_[index]) {
+        outputs_[index]->setDelayFrames(frames);
+    }
+}
+
+void OutputRouter::setDeviceCalibrationOffsetMs(size_t index, double offsetMs) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    if (index < outputs_.size() && outputs_[index]) {
+        outputs_[index]->setCalibrationOffsetMs(offsetMs);
+    }
+}
+
+void OutputRouter::setSyncStateAll(SyncState state) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    for (auto& out : outputs_) {
+        if (out) {
+            out->setSyncState(state);
+        }
+    }
+}
+
+void OutputRouter::applySyncPlan(const SyncPlan& plan) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+        if (!outputs_[i]) continue;
+        if (i < plan.calculatedDelaysMs.size()) {
+            outputs_[i]->setDelayMs(plan.calculatedDelaysMs[i]);
+        }
+        outputs_[i]->setSyncState(plan.syncState);
+    }
+}
+
 } // namespace syncwave

@@ -120,17 +120,67 @@ SyncWave explicitly disclaims claiming software timing equals physical acoustic 
 
 ---
 
-## Planned Synchronization Roadmap (Milestones 9+)
+## Milestone 9 Status: Fixed Software-Domain Output Alignment & Per-Output Delay Stage
 
-1. **Milestone 9: Static Delay Alignment & DelayBuffer**:
-   - Insertion of adjustable delay lines (`DelayBuffer`) into each `DeviceOutput` queue.
-   - Aligning playheads by delaying faster devices to match slowest device ($T_{\text{target}} = \max(\text{latency}) + \text{margin}$).
+> [!IMPORTANT]
+> **Milestone 9 implements fixed software-domain output delay compensation via per-output `DelayBuffer` lines and the `SyncController` alignment engine. It compensates observable software latencies (WASAPI stream latency, current buffer padding, router queue latency, and resampler group delay). It does NOT implement dynamic clock drift correction or adaptive micro-resampling (Milestone 10).**
 
-2. **Milestone 10: Dynamic Drift Correction & Micro-Resampling**:
+### Implemented Subsystems & Mathematical Models:
+1. **Per-Output `DelayBuffer` Placement (Post-Resampler)**:
+   - Delay stage placed **after** resampling at native device sample rates ($f_{\text{dev}}$):
+     $$\text{MasterAudioBus} \to \text{OutputRouter} \to \text{SPSC Queue} \to \text{Resampler} \to \text{DelayBuffer} \to \text{WASAPI}$$
+   - Ensures delay is applied in integer device frames ($D_{\text{frames}} = \text{round}(D_{\text{ms}} \times f_{\text{dev}} / 1000)$) without fractional interpolation error or passing silence through resampler filters.
+   - Preallocated circular stereo Float32 buffer with initial silence prefill; lock-free atomic `delayFrames_` updates; zero allocation and $O(N)$ execution time in audio callback.
+
+2. **Auditing the Latency Taxonomy (`OutputLatencyModel`)**:
+   - $L_{\text{stream}}$: Driver stream latency (`IAudioClient::GetStreamLatency`)
+   - $L_{\text{pad}}$: Mixer buffer current padding (`IAudioClient::GetCurrentPadding` / $f_{\text{dev}}$)
+   - $L_{\text{queue}}$: SPSC queue latency (`RingBuffer::availableToRead` / $f_{\text{master}}$)
+   - $L_{\text{resamp}}$: Linear interpolation filter delay ($~0.5 / f_{\text{dev}}$)
+   - $L_{\text{delay}}$: Intentional compensation delay (`DelayBuffer::delayMs`)
+   - $L_{\text{cal}}$: Optional physical acoustic calibration offset
+   - Total estimated software latency:
+     $$L_{\text{sw}} = L_{\text{stream}} + L_{\text{pad}} + L_{\text{queue}} + L_{\text{resamp}}$$
+   - Effective baseline latency:
+     $$L_{\text{eff}} = L_{\text{sw}} + L_{\text{cal}}$$
+
+3. **Alignment Mathematics (`SyncController`)**:
+   - Audio cannot travel backward; alignment uses the slowest path as the target baseline:
+     $$T_{\text{target}} = \max_{i \in \{1 \dots N\}} (L_{\text{eff}, i})$$
+   - Required compensation delay per device:
+     $$D_i = \max(0.0, T_{\text{target}} - L_{\text{eff}, i})$$
+   - Frame delay applied to `DelayBuffer`:
+     $$D_{\text{frames}, i} = \text{round}\left(D_i \times \frac{f_{\text{dev}, i}}{1000}\right)$$
+   - The slowest device receives $D = 0$ ms; faster devices are delayed to match the slowest endpoint.
+
+4. **Synchronization States (`SyncState`)**:
+   - `Disabled`: No delay alignment active ($D_i = 0$).
+   - `Manual`: User-configured static delays applied via `--delay`.
+   - `SoftwareCalibrated`: Automatically aligned based on measured software-domain latencies via `--sync software` or `syncwave calibrate`.
+   - `PhysicallyCalibrated`: Manual physical calibration offsets (`--offsets`) combined with software latency models.
+   - `Uncertain`: Measurement failed or was too noisy to determine safe alignment.
+
+### Verified Hardware Experiment:
+- Dual-device playback session across `Headphones (realme Buds T310)` (Bluetooth) and `Speakers (Realtek(R) Audio)` (Integrated):
+  - **`syncwave calibrate --outputs 2,3`**:
+    - Buds (Bluetooth): $L_{\text{sw}} = 190.67\text{ ms}$, applied delay = $0.00\text{ ms}$ (0 frames).
+    - Realtek (Integrated): $L_{\text{sw}} = 22.00\text{ ms}$, applied delay = $168.67\text{ ms}$ (8,096 frames @ 48 kHz).
+    - Target Alignment Latency = $190.67\text{ ms}$.
+    - Sync State: `SoftwareCalibrated`.
+  - **Manual Delays (`--delay 50,0`)**:
+    - Verified delay line configuration: Buds configured with 50 ms (2,400 frames); Realtek with 0 ms.
+  - **Acoustic Disclaimer**: Explicitly informs the user that external physical delays (Bluetooth A2DP RF transport ~100–250 ms, DAC filters, acoustic room propagation) are not directly measurable by software alone and can be calibrated with `--offsets`.
+
+---
+
+## Planned Synchronization Roadmap (Milestones 10+)
+
+1. **Milestone 10: Dynamic Drift Correction & Micro-Resampling**:
    - Continuous drift tracking via `DriftEstimator`.
-   - Micro-resampling / dynamic clock rate modulation to keep drift within sub-millisecond bounds without buffer underruns or pitch artifacts.
+   - Dynamic micro-resampling rate modulation to counteract PPM clock drift over long sessions without buffer underruns or audible pitch changes.
 
-3. **Milestone 11: Automatic Acoustic Calibration**:
-   - Acoustic chirp generation and loopback capture for true physical latency discovery.
+2. **Milestone 11: Automatic Acoustic Calibration**:
+   - Acoustic chirp / MLS test signal generation and microphone capture for automated end-to-end physical acoustic latency measurement.
+
 
 
