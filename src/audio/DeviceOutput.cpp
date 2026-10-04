@@ -5,7 +5,8 @@ namespace syncwave {
 
 DeviceOutput::DeviceOutput(const AudioDevice& device)
     : device_(device),
-      wasapiOutput_(std::make_unique<WasapiOutput>()) {}
+      wasapiOutput_(std::make_unique<WasapiOutput>()),
+      clock_(device.id, 48000) {}
 
 DeviceOutput::~DeviceOutput() {
     close();
@@ -35,6 +36,8 @@ bool DeviceOutput::initialize(uint32_t masterSampleRate, uint32_t masterChannels
     // Dedicated output resampler (master sample rate -> device sample rate)
     resampler_ = std::make_unique<Resampler>(masterSampleRate_, format_.sampleRate, masterChannels_);
 
+    clock_ = DeviceClock(device_.id, format_.sampleRate);
+
     framesRouted_.store(0, std::memory_order_relaxed);
     framesConsumed_.store(0, std::memory_order_relaxed);
     framesResampled_.store(0, std::memory_order_relaxed);
@@ -61,6 +64,8 @@ bool DeviceOutput::initializeForTesting(uint32_t masterSampleRate, uint32_t mast
     const size_t queueCapacity = masterSampleRate_;
     queue_ = std::make_unique<RingBuffer>(queueCapacity, masterChannels_);
     resampler_ = std::make_unique<Resampler>(masterSampleRate_, format_.sampleRate, masterChannels_);
+
+    clock_ = DeviceClock(device_.id, format_.sampleRate);
 
     framesRouted_.store(0, std::memory_order_relaxed);
     framesConsumed_.store(0, std::memory_order_relaxed);
@@ -139,6 +144,15 @@ AudioFormat DeviceOutput::format() const {
     return format_;
 }
 
+DeviceClockSample DeviceOutput::sampleClock(std::chrono::steady_clock::time_point timestamp) {
+    if (wasapiOutput_) {
+        auto snap = wasapiOutput_->getClockSnapshot();
+        clock_.recordSnapshot(snap, timestamp);
+    }
+    auto latest = clock_.latestSample();
+    return latest.value_or(DeviceClockSample{});
+}
+
 DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
     DeviceOutputTelemetry t;
     t.deviceId = device_.id;
@@ -148,13 +162,36 @@ DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
     t.masterSampleRate = masterSampleRate_;
     t.isAvailable = isAvailable();
 
-    if (wasapiOutput_) {
+    if (wasapiOutput_ && wasapiOutput_->state() == OutputState::Running) {
         t.bufferFrameCount = wasapiOutput_->bufferFrameCount();
         t.framesSubmitted = wasapiOutput_->framesRendered();
         t.wasapiUnderruns = wasapiOutput_->underruns();
-        auto clock = wasapiOutput_->getClockPosition();
-        t.clockPosition = clock.first;
-        t.clockFrequency = clock.second;
+        auto snap = wasapiOutput_->getClockSnapshot();
+        if (snap.isValid) {
+            t.clockPosition = snap.position;
+            t.clockFrequency = snap.frequency;
+            t.currentPadding = snap.currentPadding;
+            t.streamLatencyMs = snap.streamLatencyHns / 10000.0;
+        }
+    } else {
+        auto latest = clock_.latestSample();
+        if (latest && latest->isValid) {
+            t.clockPosition = latest->clockPosition;
+            t.clockFrequency = latest->clockFrequency;
+            t.currentPadding = latest->currentPadding;
+            t.streamLatencyMs = latest->streamLatencyMs();
+            t.bufferFrameCount = latest->bufferFrameCount;
+        }
+    }
+
+    auto rateEst = clock_.estimateRate();
+    if (rateEst.isValid) {
+        t.estimatedClockRateHz = rateEst.estimatedRate;
+        t.rateErrorPpm = rateEst.rateErrorPpm;
+        t.measurementDurationSec = rateEst.measurementDurationSec;
+        t.clockSampleCount = rateEst.sampleCount;
+    } else {
+        t.clockSampleCount = clock_.sampleCount();
     }
 
     if (queue_) {

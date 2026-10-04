@@ -50,6 +50,7 @@ struct EngineDiagnostics {
 
     uint64_t routerFramesDistributed = 0;
     std::vector<DeviceOutputTelemetry> outputs;
+    std::vector<PairwiseDriftEstimate> pairwiseDrift;
 
     bool isRunning = false;
     bool isCaptureMode = false;
@@ -64,6 +65,9 @@ public:
     AudioEngine& operator=(const AudioEngine&) = delete;
     AudioEngine(AudioEngine&&) = delete;
     AudioEngine& operator=(AudioEngine&&) = delete;
+
+    // Manually trigger a clock sample across all active outputs
+    void sampleClocks();
 
     // Start tone playback routed through MasterAudioBus into target endpoint(s)
     bool startTone(const AudioDevice& device, const ToneParameters& params);

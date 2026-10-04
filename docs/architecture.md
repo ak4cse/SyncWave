@@ -227,3 +227,47 @@ To ensure safety:
 3. **Multi-Output CLI & Diagnostics**:
    - Repeated `-o <dev>` and comma-separated `--outputs <id1>,<id2>` syntax supported across `tone` and `capture` commands.
    - Diagnostics report comprehensive per-endpoint telemetry.
+
+---
+
+## 7. Milestone 7: Timing & Clock Measurement Infrastructure
+
+### Component Hierarchy
+```text
+           [AudioEngine] / [Control Thread]
+                  |
+                  | sampleClocks() @ 10 Hz
+                  v
+            [OutputRouter]
+           /              \
+          v                v
+   [DeviceOutput 1] [DeviceOutput 2]
+          |                |
+          v                v
+    [DeviceClock 1]  [DeviceClock 2]
+    (128-sample OLS) (128-sample OLS)
+          \                /
+           v              v
+          [DriftEstimator]
+                 |
+                 +-> Pairwise Drift (ppm)
+                 +-> Rate Ratio (A/B)
+                 +-> Relative Offset (ms)
+```
+
+### Key Subsystems
+1. **`WasapiClockSnapshot`**:
+   - Snapshot querying `IAudioClock::GetPosition`, `IAudioClock::GetFrequency`, `IAudioClient::GetCurrentPadding`, and `IAudioClient::GetStreamLatency`.
+   - Distinguishes device clock ticks, correlated QPC timestamp, engine padding, and stream latency.
+2. **`DeviceClock`**:
+   - Thread-safe sliding window (128 samples) per endpoint.
+   - Ordinary Least Squares (OLS) linear regression calculates effective clock rate ($Hz$), deviation from nominal ($ppm$), and goodness of fit ($r^2$).
+   - Rejects uninitialized snapshots and filters jitter before calculating rates.
+3. **`DriftEstimator`**:
+   - Calculates normalized clock rate ratio and relative drift in ppm:
+     $$\text{Relative Drift (ppm)} = \left(\frac{r_A}{r_B} - 1\right) \times 10^6$$
+   - Calculates relative playhead offset in milliseconds ($T_A - T_B$).
+4. **Zero-Contention Real-Time Safety**:
+   - WASAPI audio render threads remain strictly lock-free; clock sampling is initiated out-of-band at 10 Hz by control/producer loops.
+5. **Acoustic Disclaimer**:
+   - Distinguishes software/WASAPI domain latency from physical acoustic emission latency (Bluetooth A2DP transport buffer, DAC filtering, speaker driver lag).

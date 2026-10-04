@@ -1,4 +1,4 @@
-﻿# SyncWave Synchronization Model & Architecture
+# SyncWave Synchronization Model & Architecture
 
 ## Overview
 SyncWave synchronizes real-time audio across heterogeneous Windows audio render endpoints (such as Bluetooth headphones, USB DACs, HDMI displays, and built-in Realtek speakers). Heterogeneous endpoints present two fundamental synchronization challenges:
@@ -7,32 +7,68 @@ SyncWave synchronizes real-time audio across heterogeneous Windows audio render 
 
 ---
 
-## Milestone 6 Status: Multi-Output Fan-Out (No Physical Sync Yet)
+---
 
-> [!IMPORTANT]
-> **Milestone 6 does NOT claim or implement physical acoustic synchronization, latency calibration, delay alignment, or clock drift compensation.**
+## Core Timing Concepts & Taxonomy
 
-In Milestone 6:
-- Audio frames captured from Windows system audio (or generated via `ToneGenerator`) are dispatched from the central `MasterAudioBus` by `OutputRouter`.
-- `OutputRouter` fans out identical frames to each active endpoint's dedicated SPSC queue.
-- Each endpoint's `WasapiOutput` thread pulls and renders audio at its own native hardware rate and clock pace.
-- While audio is rendered concurrently across all configured outputs, playback timing is governed solely by the respective endpoint's native hardware latency and uncompensated clock.
-- Endpoints will have noticeable phase/timing offsets (e.g. Bluetooth audio lagging ~100–200 ms behind internal speakers).
+SyncWave maintains strict distinctions between the following timing concepts:
+
+### 1. Timing Dimensions
+- **Latency**: Total transit time (in milliseconds) from audio generation or capture to physical acoustic emission.
+- **Offset**: Fixed time difference (in milliseconds) between the playheads of two audio streams at a given instant ($T_A - T_B$).
+- **Drift**: Continuous rate of divergence over time (measured in parts per million, **ppm**) caused by differing hardware oscillator frequencies:
+  $$\text{ppm} = \left(\frac{R_{\text{obs}}}{R_{\text{nom}}} - 1\right) \times 10^6$$
+
+### 2. Timing Domains & Clock References
+- **SyncWave Logical Timeline**: Logical frame counter advanced by `MasterAudioBus`.
+- **WASAPI Stream Position**: Frame playhead reported by `IAudioClock::GetPosition` paired with hardware clock frequency and QPC correlation.
+- **WASAPI Buffer Padding**: Queued frames in the Windows audio engine mixer buffer (`IAudioClient::GetCurrentPadding`).
+- **Physical Acoustic Emission**: Actual moment sound waves radiate from speakers or headphones.
+
+> [!WARNING]
+> **Acoustic Latency vs Software Timestamps**:
+> Software timestamps, QPC values, and `IAudioClient::GetStreamLatency` measure only the OS and driver buffering layers. In Windows event-driven shared mode, `GetStreamLatency` reports `0 ms` because buffers are driven by event callbacks.
+> Software clocks **do not and cannot measure physical acoustic latency**, which includes Bluetooth A2DP packetization, RF transmission, DAC anti-aliasing filter delay, and transducer mechanical inertia. Physical acoustic alignment requires external acoustic measurement (e.g. chirp analysis) planned for subsequent milestones.
 
 ---
 
-## Planned Synchronization Roadmap (Milestones 7+)
+## Milestone 7 Status: Timing & Clock Measurement Infrastructure
 
-1. **Milestone 7: Shared Timeline & Latency Calibration**:
-   - Master reference clock timeline established.
-   - Per-endpoint latency measurement (via loopback calibration, acoustic chirp analysis, or empirical WASAPI clock querying).
-   - Insertion of adjustable delay lines (`DelayBuffer`) into each `DeviceOutput` queue to align playhead arrival times across endpoints.
+> [!IMPORTANT]
+> **Milestone 7 strictly measures and models timing. It does NOT apply automatic delay compensation or drift correction.**
 
-2. **Milestone 8: Clock Drift Tracking & Dynamic Pitch/Rate Correction**:
-   - Continuous tracking of endpoint clock position via `IAudioClock::GetPosition`.
-   - Estimation of relative clock drift (ppm) relative to the master clock.
-   - Dynamic resampler ratio modulation or phase vocoding / time-stretching to prevent buffer underrun/overrun without audible clicks or pitch warble.
+### Implemented Subsystems:
+1. **`DeviceClock`**:
+   - Maintains a thread-safe sliding window (128 samples) of valid `WasapiClockSnapshot` records sampled at 10 Hz out-of-band.
+   - Computes effective clock rates ($Hz$) and nominal frequency error ($ppm$) using Ordinary Least Squares (OLS) linear regression:
+     $$\text{Estimated Rate } (\text{Hz}) = \frac{\sum (t_i - \bar{t})(p_i - \bar{p})}{\sum (t_i - \bar{t})^2}$$
+   - Evaluates goodness of fit ($r^2$) to verify clock stability.
+2. **`DriftEstimator`**:
+   - Calculates normalized clock rate ratios and pairwise relative drift ($ppm$):
+     $$\text{Relative Drift (ppm)} = \left(\frac{r_A}{r_B} - 1\right) \times 10^6, \quad \text{where } r = \frac{R_{\text{obs}}}{R_{\text{nom}}}$$
+   - Calculates instantaneous relative playhead offset ($T_A - T_B$) in milliseconds.
+3. **Telemetry & Diagnostics**:
+   - Exposed through `DeviceOutputTelemetry` and CLI reporting across `tone` and `capture` commands.
 
-3. **Milestone 9: Sub-Millisecond Phase Alignment**:
-   - Dynamic phase compensation and jitter absorption filters.
-   - Real-time phase alignment for multi-room and surround sound coherence.
+### Verified Hardware Experiment:
+- Dual-playback session running 30 seconds across `Speakers (Realtek(R) Audio)` (48 kHz) and `Headphones (realme Buds T310)` (44.1 kHz Bluetooth):
+  - **Realtek Integrated Clock**: 47,999.5 Hz (-11.1 ppm)
+  - **realme Buds Bluetooth Clock**: 48,000.3 Hz (+7.1 ppm)
+  - **Pairwise Relative Drift**: +18.18 ppm
+  - **Instantaneous Offset**: 27.8 ms
+
+---
+
+## Planned Synchronization Roadmap (Milestones 8+)
+
+1. **Milestone 8: Delay Buffer & Static Latency Alignment**:
+   - Insertion of adjustable delay lines (`DelayBuffer`) into each `DeviceOutput` queue.
+   - Aligning playheads by delaying faster devices to match slowest device ($T_{\text{target}} = \max(\text{latency}) + \text{margin}$).
+
+2. **Milestone 9: Dynamic Drift Correction**:
+   - Continuous drift tracking via `DriftEstimator`.
+   - Micro-resampling / dynamic clock rate modulation to keep drift within sub-millisecond bounds without buffer underruns or pitch artifacts.
+
+3. **Milestone 10: Automatic Calibration**:
+   - Acoustic chirp generation and loopback capture for true physical latency discovery.
+

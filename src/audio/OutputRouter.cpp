@@ -228,4 +228,38 @@ std::vector<DeviceOutputTelemetry> OutputRouter::getOutputTelemetry() const {
     return telemetryList;
 }
 
+void OutputRouter::sampleAllClocks(std::chrono::steady_clock::time_point timestamp) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    for (auto& out : outputs_) {
+        if (out->isAvailable()) {
+            out->sampleClock(timestamp);
+        }
+    }
+}
+
+std::vector<PairwiseDriftEstimate> OutputRouter::getPairwiseDriftEstimates() const {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    std::vector<PairwiseDriftEstimate> results;
+
+    if (outputs_.size() < 2) {
+        return results;
+    }
+
+    for (size_t i = 0; i < outputs_.size(); ++i) {
+        for (size_t j = i + 1; j < outputs_.size(); ++j) {
+            const auto& outA = outputs_[i];
+            const auto& outB = outputs_[j];
+            if (outA->isAvailable() && outB->isAvailable()) {
+                auto estimate = DriftEstimator::estimate(
+                    outA->clock(), outB->clock(),
+                    outA->deviceName(), outB->deviceName()
+                );
+                results.push_back(estimate);
+            }
+        }
+    }
+
+    return results;
+}
+
 } // namespace syncwave

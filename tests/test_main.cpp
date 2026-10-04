@@ -11,6 +11,8 @@
 #include "../src/audio/OutputRouter.h"
 #include "../src/dsp/Resampler.h"
 #include "../src/windows/WasapiCapture.h"
+#include "../src/sync/DeviceClock.h"
+#include "../src/sync/DriftEstimator.h"
 #include "../src/app/CommandInterface.h"
 
 #include <iostream>
@@ -1071,9 +1073,300 @@ void testAudioEngineMultiOutputIntegration() {
     }
 }
 
+void testDeviceClockBasics() {
+    std::cout << "[TEST] DeviceClock Basics & Unit Conversions\n";
+
+    syncwave::DeviceClock clock("dev-1", 48000, 100);
+    TEST_ASSERT(clock.deviceId() == "dev-1", "DeviceClock retains deviceId");
+    TEST_ASSERT(clock.nominalSampleRate() == 48000, "DeviceClock nominal rate is 48000");
+    TEST_ASSERT(clock.sampleCount() == 0, "DeviceClock initial sample count is 0");
+    TEST_ASSERT(!clock.latestSample().has_value(), "DeviceClock initial latestSample is empty");
+
+    auto est = clock.estimateRate();
+    TEST_ASSERT(!est.isValid, "Initial clock rate estimate is invalid (no samples)");
+
+    // Test DeviceClockSample conversions
+    syncwave::DeviceClockSample sample;
+    sample.timestamp = std::chrono::steady_clock::now();
+    sample.clockPosition = 48000 * 2; // 2 seconds
+    sample.clockFrequency = 48000;
+    sample.sampleRate = 48000;
+    sample.currentPadding = 480;      // 10ms at 48kHz
+    sample.streamLatencyHns = 100000; // 10ms = 100,000 * 100ns
+    sample.isValid = true;
+
+    TEST_ASSERT(std::abs(sample.streamLatencyMs() - 10.0) < 0.001, "streamLatencyMs converts hns to ms correctly");
+    TEST_ASSERT(std::abs(sample.streamLatencySec() - 0.01) < 0.0001, "streamLatencySec converts hns to sec correctly");
+    TEST_ASSERT(std::abs(sample.paddingMs() - 10.0) < 0.001, "paddingMs converts frames to ms correctly");
+    TEST_ASSERT(std::abs(sample.positionSeconds() - 2.0) < 0.001, "positionSeconds converts ticks to seconds");
+    TEST_ASSERT(sample.positionFrames() == 96000, "positionFrames converts ticks to frames");
+
+    // Test with non-sample-rate clock frequency (e.g. 384000 Hz)
+    syncwave::DeviceClockSample sample384k;
+    sample384k.clockPosition = 768000; // 2 seconds
+    sample384k.clockFrequency = 384000;
+    sample384k.sampleRate = 48000;
+    sample384k.isValid = true;
+    TEST_ASSERT(std::abs(sample384k.positionSeconds() - 2.0) < 0.001, "positionSeconds handles 384kHz clock frequency");
+    TEST_ASSERT(sample384k.positionFrames() == 96000, "positionFrames converts 384kHz clock to 48kHz frames");
+}
+
+void testDeviceClockLinearRegression() {
+    std::cout << "[TEST] DeviceClock Linear Regression Rate Estimation\n";
+
+    // Scenario 1: Exact 48000 Hz clock
+    syncwave::DeviceClock clock("dev-exact", 48000, 100);
+    auto t0 = std::chrono::steady_clock::now();
+
+    for (int i = 0; i < 30; ++i) {
+        syncwave::DeviceClockSample s;
+        // Step of 100ms
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        // Position advances exactly 4800 ticks per 100ms
+        s.clockPosition = static_cast<uint64_t>(i * 4800);
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clock.recordSample(s);
+    }
+
+    auto est = clock.estimateRate();
+    TEST_ASSERT(est.isValid, "Clock rate estimate is valid with 30 samples");
+    TEST_ASSERT(est.sampleCount == 30, "Estimate sample count is 30");
+    TEST_ASSERT(std::abs(est.estimatedRate - 48000.0) < 0.5, "Estimated rate is ~48000 Hz");
+    TEST_ASSERT(std::abs(est.rateErrorPpm) < 10.0, "Rate error ppm is ~0 for ideal clock");
+    TEST_ASSERT(est.measurementDurationSec > 2.8, "Measurement duration is ~2.9s");
+    TEST_ASSERT(est.rSquared > 0.9999, "Goodness-of-fit rSquared > 0.9999 for linear progression");
+
+    // Scenario 2: Clock drifting fast (+50 ppm)
+    // 48000 * (1 + 50e-6) = 48002.4 Hz
+    // Ticks per 100ms = 4800.24
+    syncwave::DeviceClock driftingClock("dev-drift", 48000, 100);
+    for (int i = 0; i < 30; ++i) {
+        syncwave::DeviceClockSample s;
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        s.clockPosition = static_cast<uint64_t>(std::round(i * 4800.24));
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        driftingClock.recordSample(s);
+    }
+
+    auto estDrift = driftingClock.estimateRate();
+    TEST_ASSERT(estDrift.isValid, "Drifting clock rate estimate is valid");
+    TEST_ASSERT(std::abs(estDrift.estimatedRate - 48002.4) < 1.0, "Estimated rate is ~48002.4 Hz");
+    TEST_ASSERT(std::abs(estDrift.rateErrorPpm - 50.0) < 2.0, "Rate error ppm is ~+50 ppm (+/- 2 ppm)");
+}
+
+void testDeviceClockInsufficientSamples() {
+    std::cout << "[TEST] DeviceClock Insufficient & Edge-Case Samples\n";
+
+    syncwave::DeviceClock clock("dev-edge", 48000, 100);
+    TEST_ASSERT(!clock.estimateRate().isValid, "0 samples -> isValid == false");
+
+    syncwave::DeviceClockSample s1;
+    s1.timestamp = std::chrono::steady_clock::now();
+    s1.clockPosition = 0;
+    s1.clockFrequency = 48000;
+    s1.isValid = true;
+    clock.recordSample(s1);
+    TEST_ASSERT(!clock.estimateRate().isValid, "1 sample -> isValid == false");
+
+    // Second sample with same timestamp (dt == 0)
+    syncwave::DeviceClockSample s2 = s1;
+    s2.clockPosition = 480;
+    clock.recordSample(s2);
+    TEST_ASSERT(!clock.estimateRate().isValid, "2 samples with dt == 0 -> isValid == false");
+
+    // Reset clears everything
+    clock.reset();
+    TEST_ASSERT(clock.sampleCount() == 0, "reset() clears sampleCount");
+    TEST_ASSERT(!clock.estimateRate().isValid, "reset() invalidates rate estimate");
+}
+
+void testDriftEstimatorCalculations() {
+    std::cout << "[TEST] DriftEstimator Mathematical Calculations\n";
+
+    // calculatePpm:
+    // (48002.4 / 48000.0 - 1.0) * 1e6 = 50.0
+    double ppmFast = syncwave::DriftEstimator::calculatePpm(48002.4, 48000.0);
+    TEST_ASSERT(std::abs(ppmFast - 50.0) < 0.01, "calculatePpm for +50 ppm clock is accurate");
+
+    // (47997.6 / 48000.0 - 1.0) * 1e6 = -50.0
+    double ppmSlow = syncwave::DriftEstimator::calculatePpm(47997.6, 48000.0);
+    TEST_ASSERT(std::abs(ppmSlow - (-50.0)) < 0.01, "calculatePpm for -50 ppm clock is accurate");
+
+    // Zero nominal handling
+    TEST_ASSERT(syncwave::DriftEstimator::calculatePpm(48000.0, 0.0) == 0.0, "calculatePpm handles 0 nominal rate gracefully");
+
+    // Relative ppm:
+    // Clock A = 48000 / 48000 = 1.0
+    // Clock B = 44102.205 / 44100 = 1.00005 (+50 ppm)
+    // relative = (1.0 / 1.00005 - 1.0) * 1e6 =~ -49.9975 ppm
+    double relPpm = syncwave::DriftEstimator::calculateRelativePpm(48000.0, 48000.0, 44102.205, 44100.0);
+    TEST_ASSERT(std::abs(relPpm - (-49.9975)) < 0.01, "calculateRelativePpm across 48kHz and 44.1kHz is accurate");
+
+    // Relative ppm with zero rates
+    TEST_ASSERT(syncwave::DriftEstimator::calculateRelativePpm(48000.0, 48000.0, 0.0, 44100.0) == 0.0,
+                "calculateRelativePpm handles 0 rate gracefully");
+}
+
+void testDriftEstimatorPairwise() {
+    std::cout << "[TEST] DriftEstimator Pairwise Clock Evaluation\n";
+
+    syncwave::DeviceClock clockA("dev-speaker", 48000, 100);
+    syncwave::DeviceClock clockB("dev-buds", 44100, 100);
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 25; ++i) {
+        auto t = t0 + std::chrono::milliseconds(i * 100);
+        // Clock A: 48000 Hz nominal, exact
+        syncwave::DeviceClockSample sa;
+        sa.timestamp = t;
+        sa.clockPosition = static_cast<uint64_t>(i * 4800);
+        sa.clockFrequency = 48000;
+        sa.sampleRate = 48000;
+        sa.isValid = true;
+        clockA.recordSample(sa);
+
+        // Clock B: 44100 Hz nominal, +50 ppm faster: 44102.205 Hz
+        syncwave::DeviceClockSample sb;
+        sb.timestamp = t;
+        sb.clockPosition = static_cast<uint64_t>(std::round(i * 4410.2205));
+        sb.clockFrequency = 44100;
+        sb.sampleRate = 44100;
+        sb.isValid = true;
+        clockB.recordSample(sb);
+    }
+
+    auto pair = syncwave::DriftEstimator::estimate(clockA, clockB, "Realtek", "realme Buds");
+    TEST_ASSERT(pair.isValid, "PairwiseDriftEstimate is valid");
+    TEST_ASSERT(pair.deviceNameA == "Realtek", "Pairwise estimate retains deviceNameA");
+    TEST_ASSERT(pair.deviceNameB == "realme Buds", "Pairwise estimate retains deviceNameB");
+    TEST_ASSERT(std::abs(pair.estimatedRateA - 48000.0) < 1.0, "Estimated rate A is ~48000 Hz");
+    TEST_ASSERT(std::abs(pair.estimatedRateB - 44102.2) < 1.0, "Estimated rate B is ~44102.2 Hz");
+    TEST_ASSERT(pair.relativeDriftPpm < -45.0 && pair.relativeDriftPpm > -55.0, "Relative drift is ~-50 ppm");
+    TEST_ASSERT(pair.sampleCountA == 25 && pair.sampleCountB == 25, "Sample counts are 25");
+}
+
+void testDriftEstimatorRobustness() {
+    std::cout << "[TEST] DriftEstimator Robustness & Disconnection Handling\n";
+
+    syncwave::DeviceClock validClock("dev-valid", 48000, 100);
+    syncwave::DeviceClock emptyClock("dev-empty", 48000, 100);
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; ++i) {
+        syncwave::DeviceClockSample s;
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        s.clockPosition = static_cast<uint64_t>(i * 4800);
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        validClock.recordSample(s);
+    }
+
+    auto pair1 = syncwave::DriftEstimator::estimate(validClock, emptyClock);
+    TEST_ASSERT(!pair1.isValid, "Drift estimate with one empty clock is invalid");
+
+    auto pair2 = syncwave::DriftEstimator::estimate(emptyClock, emptyClock);
+    TEST_ASSERT(!pair2.isValid, "Drift estimate with two empty clocks is invalid");
+}
+
+void testWasapiClockSnapshotIntegration() {
+    std::cout << "[TEST] WasapiClockSnapshot Live Endpoint Query\n";
+    syncwave::ComInitializer com;
+    syncwave::DeviceManager mgr;
+    auto defaultDev = mgr.getDefaultDevice();
+    if (!defaultDev) {
+        std::cout << "    Skipping live snapshot test (no active default audio device found)\n";
+        return;
+    }
+
+    syncwave::WasapiOutput output;
+    TEST_ASSERT(output.open(defaultDev->id), "Opened default device for snapshot test");
+    TEST_ASSERT(output.initialize(), "Initialized default device for snapshot test");
+
+    auto snap = output.getClockSnapshot();
+    TEST_ASSERT(snap.isValid, "WasapiClockSnapshot is valid on initialized device");
+    TEST_ASSERT(snap.frequency > 0, "WasapiClockSnapshot frequency > 0");
+    TEST_ASSERT(snap.sampleRate > 0, "WasapiClockSnapshot sampleRate > 0");
+    TEST_ASSERT(snap.bufferFrameCount > 0, "WasapiClockSnapshot bufferFrameCount > 0");
+    TEST_ASSERT(snap.streamLatencyHns >= 0, "WasapiClockSnapshot streamLatencyHns >= 0");
+
+    output.close();
+}
+
+void testOutputRouterClockTelemetry() {
+    std::cout << "[TEST] OutputRouter Clock Sampling and Telemetry\n";
+
+    syncwave::OutputRouter router;
+    syncwave::AudioDevice dev1{"dev-1", "Endpoint 1", syncwave::DeviceState::Active, true, false};
+    syncwave::AudioDevice dev2{"dev-2", "Endpoint 2", syncwave::DeviceState::Active, false, false};
+
+    router.addOutput(dev1);
+    router.addOutput(dev2);
+
+    bool inited = router.initializeOutputsForTesting(48000, 2);
+    TEST_ASSERT(inited, "initializeOutputsForTesting succeeded for 2 outputs");
+
+    // Initially sampleAllClocks() works cleanly even if outputs have no live WASAPI client
+    router.sampleAllClocks();
+
+    auto telemsInitial = router.getOutputTelemetry();
+    TEST_ASSERT(telemsInitial.size() == 2, "Output telemetry contains 2 devices");
+    TEST_ASSERT(telemsInitial[0].clockSampleCount == 0, "No snapshots recorded yet without live WASAPI client");
+
+    // Feed synthetic snapshots into the embedded DeviceClock objects
+    auto* out1 = router.getOutput(0);
+    auto* out2 = router.getOutput(1);
+    TEST_ASSERT(out1 != nullptr && out2 != nullptr, "Retrieved outputs from router");
+
+    auto t0 = std::chrono::steady_clock::now();
+    for (int i = 0; i < 20; ++i) {
+        auto t = t0 + std::chrono::milliseconds(i * 100);
+
+        syncwave::WasapiClockSnapshot s1;
+        s1.isValid = true;
+        s1.position = i * 4800;
+        s1.frequency = 48000;
+        s1.sampleRate = 48000;
+        s1.currentPadding = 480;
+        s1.streamLatencyHns = 100000; // 10ms
+        s1.bufferFrameCount = 960;
+        out1->clock().recordSnapshot(s1, t);
+
+        syncwave::WasapiClockSnapshot s2;
+        s2.isValid = true;
+        s2.position = static_cast<uint64_t>(std::round(i * 4410.22));
+        s2.frequency = 44100;
+        s2.sampleRate = 44100;
+        s2.currentPadding = 441;
+        s2.streamLatencyHns = 200000; // 20ms
+        s2.bufferFrameCount = 882;
+        out2->clock().recordSnapshot(s2, t);
+    }
+
+    auto telems = router.getOutputTelemetry();
+    TEST_ASSERT(telems.size() == 2, "Router returns telemetry for both endpoints");
+    TEST_ASSERT(telems[0].clockSampleCount == 20, "Output 1 has 20 clock samples");
+    TEST_ASSERT(telems[1].clockSampleCount == 20, "Output 2 has 20 clock samples");
+    TEST_ASSERT(std::abs(telems[0].streamLatencyMs - 10.0) < 0.1, "Output 1 stream latency is 10.0ms");
+    TEST_ASSERT(std::abs(telems[1].streamLatencyMs - 20.0) < 0.1, "Output 2 stream latency is 20.0ms");
+    TEST_ASSERT(std::abs(telems[0].estimatedClockRateHz - 48000.0) < 1.0, "Output 1 estimated rate is ~48000 Hz");
+    TEST_ASSERT(std::abs(telems[1].estimatedClockRateHz - 44102.2) < 1.0, "Output 2 estimated rate is ~44102.2 Hz");
+
+    auto pairs = router.getPairwiseDriftEstimates();
+    TEST_ASSERT(pairs.size() == 1, "Exactly 1 pairwise drift estimate for 2 outputs");
+    TEST_ASSERT(pairs[0].isValid, "Pairwise estimate is valid");
+    TEST_ASSERT(pairs[0].sampleCountA == 20 && pairs[0].sampleCountB == 20, "Pairwise estimate uses 20 samples per device");
+
+    router.closeOutputs();
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 6)   \n";
+    std::cout << "      SyncWave Test Suite (Phase 7)   \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -1101,6 +1394,14 @@ int main() {
     testOutputRouterDisconnectHandling();
     testOutputRouterCleanShutdown();
     testAudioEngineMultiOutputIntegration();
+    testDeviceClockBasics();
+    testDeviceClockLinearRegression();
+    testDeviceClockInsufficientSamples();
+    testDriftEstimatorCalculations();
+    testDriftEstimatorPairwise();
+    testDriftEstimatorRobustness();
+    testWasapiClockSnapshotIntegration();
+    testOutputRouterClockTelemetry();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

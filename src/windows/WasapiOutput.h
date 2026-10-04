@@ -23,6 +23,19 @@ std::string outputStateToString(OutputState state);
 
 using RenderCallback = std::function<void(uint8_t* destinationBuffer, uint32_t frameCount, const AudioFormat& format)>;
 
+struct WasapiClockSnapshot {
+    bool isValid = false;
+    uint64_t position = 0;
+    uint64_t qpcPosition = 0;
+    uint64_t frequency = 0;
+    uint32_t sampleRate = 0;
+    uint32_t bufferFrameCount = 0;
+    uint32_t currentPadding = 0;
+    int64_t streamLatencyHns = 0; // 100-nanosecond units (REFERENCE_TIME)
+    uint64_t framesRendered = 0;
+    uint32_t underruns = 0;
+};
+
 class WasapiOutput {
 public:
     WasapiOutput();
@@ -58,6 +71,9 @@ public:
 
     // Queries IAudioClock if available, returns { positionInFrames, clockFrequencyHz }
     [[nodiscard]] std::pair<uint64_t, uint64_t> getClockPosition() const;
+
+    // Queries comprehensive WASAPI timing snapshot (IAudioClock, IAudioClient padding, stream latency)
+    [[nodiscard]] WasapiClockSnapshot getClockSnapshot() const;
 
 private:
     struct Impl;

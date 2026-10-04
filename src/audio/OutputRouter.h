@@ -2,11 +2,13 @@
 
 #include "DeviceOutput.h"
 #include "MasterAudioBus.h"
+#include "../sync/DriftEstimator.h"
 #include <vector>
 #include <memory>
 #include <string>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 namespace syncwave {
 
@@ -60,6 +62,12 @@ public:
 
     // Handle endpoint invalidation / unplug
     void onDeviceDisconnected(const std::string& deviceId);
+
+    // Sample clocks across all active outputs simultaneously
+    void sampleAllClocks(std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now());
+
+    // Pairwise clock rate and drift estimation between all active output pairs
+    [[nodiscard]] std::vector<PairwiseDriftEstimate> getPairwiseDriftEstimates() const;
 
     [[nodiscard]] bool allRunning() const;
     [[nodiscard]] bool anyRunning() const;

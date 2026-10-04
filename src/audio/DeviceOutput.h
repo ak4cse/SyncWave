@@ -5,6 +5,7 @@
 #include "../dsp/Resampler.h"
 #include "../windows/DeviceManager.h"
 #include "../windows/WasapiOutput.h"
+#include "../sync/DeviceClock.h"
 #include <string>
 #include <memory>
 #include <atomic>
@@ -30,6 +31,12 @@ struct DeviceOutputTelemetry {
     uint32_t wasapiUnderruns = 0;
     uint64_t clockPosition = 0;
     uint64_t clockFrequency = 0;
+    uint32_t currentPadding = 0;
+    double streamLatencyMs = 0.0;
+    double estimatedClockRateHz = 0.0;
+    double rateErrorPpm = 0.0;
+    double measurementDurationSec = 0.0;
+    size_t clockSampleCount = 0;
     bool isAvailable = true;
 };
 
@@ -73,6 +80,12 @@ public:
     [[nodiscard]] const RingBuffer* queue() const { return queue_.get(); }
     [[nodiscard]] Resampler* resampler() { return resampler_.get(); }
 
+    // Sample WASAPI clock, stream latency, and padding into DeviceClock
+    DeviceClockSample sampleClock(std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now());
+
+    [[nodiscard]] DeviceClock& clock() { return clock_; }
+    [[nodiscard]] const DeviceClock& clock() const { return clock_; }
+
     [[nodiscard]] DeviceOutputTelemetry getTelemetry() const;
 
 private:
@@ -84,6 +97,7 @@ private:
     std::unique_ptr<WasapiOutput> wasapiOutput_;
     std::unique_ptr<RingBuffer> queue_;
     std::unique_ptr<Resampler> resampler_;
+    DeviceClock clock_;
 
     std::atomic<uint64_t> framesRouted_{0};
     std::atomic<uint64_t> framesConsumed_{0};

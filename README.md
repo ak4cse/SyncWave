@@ -53,10 +53,15 @@ SyncWave captures system audio (via WASAPI loopback) and renders it concurrently
   - Non-destructive queue overflow protection and hot-unplug tolerance.
   - Concurrent multi-endpoint rendering across heterogeneous devices (e.g. 48.0 kHz Realtek + 44.1 kHz Bluetooth realme Buds T310).
   - CLI commands: `syncwave tone --outputs 2,3`, `syncwave capture --outputs 2,3`
-- [ ] **Milestone 7 — Shared Timeline & Latency Calibration**
+- [x] **Milestone 7 — Timing & Clock Measurement Infrastructure**
+  - Low-level WASAPI hardware clock querying (`IAudioClock`, `IAudioClient::GetCurrentPadding`, `GetStreamLatency`).
+  - Sliding-window Ordinary Least Squares (OLS) linear regression clock rate modeling (`DeviceClock`) reporting effective rate ($Hz$) and nominal error ($ppm$).
+  - Pairwise relative drift estimation (`DriftEstimator`) computing rate ratios, relative drift ($ppm$), and playhead offset ($ms$).
+  - Non-intrusive 10 Hz out-of-band sampling maintaining zero contention and real-time safety on WASAPI render threads.
+  - Physical acoustic latency vs software latency domain distinction.
 - [ ] **Milestone 8 — DelayBuffer & Static Delay Alignment**
-- [ ] **Milestone 9 — Automatic Calibration**
-- [ ] **Milestone 10+ — Clock Tracking & Drift Correction**
+- [ ] **Milestone 9 — Dynamic Drift Correction**
+- [ ] **Milestone 10 — Automatic Calibration**
 
 ---
 

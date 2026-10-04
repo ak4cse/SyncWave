@@ -223,6 +223,74 @@ int CommandInterface::handleWatchCommand(const std::vector<std::string>& args) {
     return 0;
 }
 
+static void printOutputTelemetry(const std::vector<DeviceOutputTelemetry>& outputs,
+                                 const std::vector<PairwiseDriftEstimate>& pairwiseDrift) {
+    std::cout << "Per-Output Timing & Audio Telemetry (" << outputs.size() << " endpoints):\n";
+    if (outputs.empty()) {
+        std::cout << "  (No outputs configured)\n\n";
+        return;
+    }
+
+    for (size_t i = 0; i < outputs.size(); ++i) {
+        const auto& out = outputs[i];
+        std::cout << "  [" << i << "] " << out.deviceName << "\n";
+        std::cout << "      State:            " << outputStateToString(out.state) << "\n";
+        std::cout << "      Available:        " << (out.isAvailable ? "Yes" : "No (Disconnected)") << "\n";
+        std::cout << "      Format:           " << out.format.formatString() << "\n";
+        std::cout << "      Queue:            " << out.queueAvailable << " / " << out.queueCapacity << " frames\n";
+        std::cout << "      Frames routed:    " << out.framesRouted << "\n";
+        std::cout << "      Frames consumed:  " << out.framesConsumed << "\n";
+        if (out.format.sampleRate != out.masterSampleRate) {
+            std::cout << "      Frames resampled: " << out.framesResampled << " (" 
+                      << out.masterSampleRate << " -> " << out.format.sampleRate << " Hz)\n";
+        }
+        std::cout << "      WASAPI submitted: " << out.framesSubmitted << "\n";
+        std::cout << "      Queue underruns:  " << out.queueUnderruns << "\n";
+        std::cout << "      Queue overruns:   " << out.queueOverruns << "\n";
+        std::cout << "      WASAPI underruns: " << out.wasapiUnderruns << "\n";
+        if (out.streamLatencyMs > 0.0) {
+            std::cout << "      Stream latency:   " << out.streamLatencyMs << " ms\n";
+        } else if (out.streamLatencyMs == 0.0 && out.clockSampleCount > 0) {
+            std::cout << "      Stream latency:   0.0 ms (event-driven shared mode)\n";
+        } else {
+            std::cout << "      Stream latency:   unavailable\n";
+        }
+        double paddingMs = (out.format.sampleRate > 0) ? (static_cast<double>(out.currentPadding) * 1000.0 / out.format.sampleRate) : 0.0;
+        std::cout << "      Current padding:  " << out.currentPadding << " frames (" << paddingMs << " ms)\n";
+        std::cout << "      Clock frequency:  " << out.clockFrequency << " Hz\n";
+        std::cout << "      Clock position:   " << out.clockPosition << " frames\n";
+        if (out.estimatedClockRateHz > 0.0) {
+            std::cout << "      Estimated rate:   " << out.estimatedClockRateHz << " Hz\n";
+            std::cout << "      Nominal error:    " << (out.rateErrorPpm >= 0.0 ? "+" : "") << out.rateErrorPpm << " ppm\n";
+            std::cout << "      Measurement span: " << out.measurementDurationSec << " s (" << out.clockSampleCount << " samples)\n";
+        } else {
+            std::cout << "      Estimated rate:   accumulating (" << out.clockSampleCount << " samples)\n";
+        }
+        std::cout << "\n";
+    }
+
+    if (!pairwiseDrift.empty()) {
+        std::cout << "Relative Clock Drift Estimates (" << pairwiseDrift.size() << " pair" << (pairwiseDrift.size() > 1 ? "s" : "") << "):\n";
+        for (const auto& pair : pairwiseDrift) {
+            std::cout << "  " << pair.deviceNameA << " <-> " << pair.deviceNameB << ":\n";
+            if (pair.isValid) {
+                std::cout << "      Relative drift:   " << (pair.relativeDriftPpm >= 0.0 ? "+" : "") << pair.relativeDriftPpm << " ppm\n";
+                std::cout << "      Rate ratio:       " << pair.rateRatio << " (A / B normalized)\n";
+                std::cout << "      Estimated rates:  " << pair.estimatedRateA << " Hz vs " << pair.estimatedRateB << " Hz\n";
+                std::cout << "      Relative offset:  " << (pair.relativeOffsetSec * 1000.0) << " ms\n";
+                std::cout << "      Measurement span: " << pair.measurementDurationSec << " s\n";
+            } else {
+                std::cout << "      Status:           accumulating timing samples...\n";
+            }
+            std::cout << "\n";
+        }
+    }
+
+    std::cout << "[TIMING NOTE] Software timestamps and WASAPI stream latency do NOT measure physical acoustic latency.\n"
+              << "Hardware DAC filtering, Bluetooth A2DP transport buffering, and speaker drivers introduce additional delay.\n"
+              << "Delay alignment and acoustic synchronization will be implemented in Milestones 8+.\n\n";
+}
+
 int CommandInterface::handleStatusCommand(const std::vector<std::string>& /*args*/) {
     auto diag = audioEngine_->getDiagnostics();
 
@@ -254,31 +322,7 @@ int CommandInterface::handleStatusCommand(const std::vector<std::string>& /*args
     std::cout << "  Bus overruns:       " << diag.busOverruns << "\n";
     std::cout << "  Router distributed: " << diag.routerFramesDistributed << " frames\n\n";
 
-    std::cout << "Configured Outputs (" << diag.outputs.size() << "):\n";
-    if (diag.outputs.empty()) {
-        std::cout << "  (No outputs configured)\n\n";
-    } else {
-        for (size_t i = 0; i < diag.outputs.size(); ++i) {
-            const auto& out = diag.outputs[i];
-            std::cout << "  [" << i << "] " << out.deviceName << "\n";
-            std::cout << "      State:            " << outputStateToString(out.state) << "\n";
-            std::cout << "      Available:        " << (out.isAvailable ? "Yes" : "No (Disconnected)") << "\n";
-            std::cout << "      Format:           " << out.format.formatString() << "\n";
-            std::cout << "      Queue:            " << out.queueAvailable << " / " << out.queueCapacity << " frames\n";
-            std::cout << "      Frames routed:    " << out.framesRouted << "\n";
-            std::cout << "      Frames consumed:  " << out.framesConsumed << "\n";
-            if (out.format.sampleRate != out.masterSampleRate) {
-                std::cout << "      Frames resampled: " << out.framesResampled << " (" 
-                          << out.masterSampleRate << " -> " << out.format.sampleRate << " Hz)\n";
-            }
-            std::cout << "      WASAPI submitted: " << out.framesSubmitted << "\n";
-            std::cout << "      Queue underruns:  " << out.queueUnderruns << "\n";
-            std::cout << "      Queue overruns:   " << out.queueOverruns << "\n";
-            std::cout << "      WASAPI underruns: " << out.wasapiUnderruns << "\n";
-            std::cout << "      Clock position:   " << out.clockPosition << " frames (@ " 
-                      << out.clockFrequency << " Hz)\n\n";
-        }
-    }
+    printOutputTelemetry(diag.outputs, diag.pairwiseDrift);
 
     return 0;
 }
@@ -394,6 +438,7 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
     SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
 
     auto startTime = std::chrono::steady_clock::now();
+    auto lastSampleTime = startTime;
 
     while (!g_stopRequested.load()) {
         if (!audioEngine_->isRunning()) {
@@ -407,6 +452,12 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
             if (elapsed >= duration) {
                 break;
             }
+        }
+
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastSampleTime >= std::chrono::milliseconds(100)) {
+            audioEngine_->sampleClocks();
+            lastSampleTime = now;
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -427,24 +478,7 @@ int CommandInterface::handleToneCommand(const std::vector<std::string>& args) {
     std::cout << "  Bus underruns:       " << finalDiag.busUnderruns << "\n";
     std::cout << "  Bus overruns:        " << finalDiag.busOverruns << "\n\n";
 
-    std::cout << "Per-Output Telemetry:\n";
-    for (size_t i = 0; i < finalDiag.outputs.size(); ++i) {
-        const auto& out = finalDiag.outputs[i];
-        std::cout << "  [" << i << "] " << out.deviceName << "\n";
-        std::cout << "      Format:           " << out.format.formatString() << "\n";
-        std::cout << "      Frames routed:    " << out.framesRouted << "\n";
-        std::cout << "      Frames consumed:  " << out.framesConsumed << "\n";
-        if (out.format.sampleRate != out.masterSampleRate) {
-            std::cout << "      Frames resampled: " << out.framesResampled << " (" 
-                      << out.masterSampleRate << " -> " << out.format.sampleRate << " Hz)\n";
-        }
-        std::cout << "      WASAPI submitted: " << out.framesSubmitted << "\n";
-        std::cout << "      Queue underruns:  " << out.queueUnderruns << "\n";
-        std::cout << "      Queue overruns:   " << out.queueOverruns << "\n";
-        std::cout << "      WASAPI underruns: " << out.wasapiUnderruns << "\n";
-        std::cout << "      Clock position:   " << out.clockPosition << " frames (@ " 
-                  << out.clockFrequency << " Hz)\n\n";
-    }
+    printOutputTelemetry(finalDiag.outputs, finalDiag.pairwiseDrift);
     std::cout << std::flush;
 
     return 0;
@@ -570,6 +604,7 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
     SetConsoleCtrlHandler(consoleCtrlHandler, TRUE);
 
     auto startTime = std::chrono::steady_clock::now();
+    auto lastSampleTime = startTime;
 
     while (!g_stopRequested.load()) {
         if (!audioEngine_->isRunning()) {
@@ -585,7 +620,13 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        auto now = std::chrono::steady_clock::now();
+        if (now - lastSampleTime >= std::chrono::milliseconds(100)) {
+            audioEngine_->sampleClocks();
+            lastSampleTime = now;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
     audioEngine_->stop();
@@ -610,24 +651,7 @@ int CommandInterface::handleCaptureCommand(const std::vector<std::string>& args)
     std::cout << "  Bus underruns:       " << finalDiag.busUnderruns << "\n";
     std::cout << "  Bus overruns:        " << finalDiag.busOverruns << "\n\n";
 
-    std::cout << "Per-Output Telemetry:\n";
-    for (size_t i = 0; i < finalDiag.outputs.size(); ++i) {
-        const auto& out = finalDiag.outputs[i];
-        std::cout << "  [" << i << "] " << out.deviceName << "\n";
-        std::cout << "      Format:           " << out.format.formatString() << "\n";
-        std::cout << "      Frames routed:    " << out.framesRouted << "\n";
-        std::cout << "      Frames consumed:  " << out.framesConsumed << "\n";
-        if (out.format.sampleRate != out.masterSampleRate) {
-            std::cout << "      Frames resampled: " << out.framesResampled << " (" 
-                      << out.masterSampleRate << " -> " << out.format.sampleRate << " Hz)\n";
-        }
-        std::cout << "      WASAPI submitted: " << out.framesSubmitted << "\n";
-        std::cout << "      Queue underruns:  " << out.queueUnderruns << "\n";
-        std::cout << "      Queue overruns:   " << out.queueOverruns << "\n";
-        std::cout << "      WASAPI underruns: " << out.wasapiUnderruns << "\n";
-        std::cout << "      Clock position:   " << out.clockPosition << " frames (@ " 
-                  << out.clockFrequency << " Hz)\n\n";
-    }
+    printOutputTelemetry(finalDiag.outputs, finalDiag.pairwiseDrift);
     std::cout << std::flush;
 
     return 0;

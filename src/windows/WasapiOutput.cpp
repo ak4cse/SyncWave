@@ -443,4 +443,46 @@ std::pair<uint64_t, uint64_t> WasapiOutput::getClockPosition() const {
     return { framesRendered(), impl_->format.sampleRate };
 }
 
+WasapiClockSnapshot WasapiOutput::getClockSnapshot() const {
+    WasapiClockSnapshot snap;
+    if (!impl_) {
+        return snap;
+    }
+
+    snap.framesRendered = framesRendered();
+    snap.underruns = underruns();
+    snap.sampleRate = impl_->format.sampleRate;
+    snap.bufferFrameCount = impl_->bufferFrameCount;
+
+    if (impl_->pAudioClient) {
+        UINT32 padding = 0;
+        if (SUCCEEDED(impl_->pAudioClient->GetCurrentPadding(&padding))) {
+            snap.currentPadding = padding;
+        }
+
+        REFERENCE_TIME latencyRef = 0;
+        if (SUCCEEDED(impl_->pAudioClient->GetStreamLatency(&latencyRef))) {
+            snap.streamLatencyHns = latencyRef;
+        }
+    }
+
+    if (impl_->pAudioClock) {
+        UINT64 pos = 0, qpc = 0, freq = 0;
+        if (SUCCEEDED(impl_->pAudioClock->GetPosition(&pos, &qpc)) &&
+            SUCCEEDED(impl_->pAudioClock->GetFrequency(&freq)) && freq > 0) {
+            snap.position = pos;
+            snap.qpcPosition = qpc;
+            snap.frequency = freq;
+            snap.isValid = true;
+            return snap;
+        }
+    }
+
+    // Fallback if IAudioClock query failed or is uninitialized
+    snap.position = snap.framesRendered;
+    snap.frequency = snap.sampleRate > 0 ? snap.sampleRate : 48000;
+    snap.isValid = (snap.framesRendered > 0 || impl_->state == OutputState::Running);
+    return snap;
+}
+
 } // namespace syncwave

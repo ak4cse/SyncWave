@@ -20,6 +20,7 @@ void AudioEngine::producerLoop() {
     const auto chunkDuration = std::chrono::microseconds(1000000ULL * CHUNK_SIZE / busFormat.sampleRate);
 
     auto nextTick = std::chrono::steady_clock::now();
+    uint32_t loopTick = 0;
 
     while (producerRunning_.load(std::memory_order_acquire)) {
         size_t freeSpace = masterBus_.freeFrames();
@@ -27,6 +28,10 @@ void AudioEngine::producerLoop() {
             toneGen_.generateFrames(reinterpret_cast<uint8_t*>(chunk.data()), CHUNK_SIZE, busFormat);
             masterBus_.write(chunk.data(), CHUNK_SIZE);
             router_.dispatch(masterBus_);
+        }
+
+        if (++loopTick % 10 == 0) {
+            router_.sampleAllClocks();
         }
 
         nextTick += chunkDuration;
@@ -189,7 +194,12 @@ void AudioEngine::onDeviceDisconnected(const std::string& deviceId) {
     router_.onDeviceDisconnected(deviceId);
 }
 
+void AudioEngine::sampleClocks() {
+    router_.sampleAllClocks();
+}
+
 void AudioEngine::stop() {
+    sampleClocks();
     lastDiag_ = getDiagnostics();
     lastDiag_.isRunning = false;
 
@@ -222,6 +232,7 @@ EngineDiagnostics AudioEngine::getDiagnostics() const {
 
     EngineDiagnostics diag;
     diag.outputs = router_.getOutputTelemetry();
+    diag.pairwiseDrift = router_.getPairwiseDriftEstimates();
     diag.routerFramesDistributed = router_.totalFramesDistributed();
 
     // Populate primary output fields for backwards compatibility
