@@ -134,3 +134,24 @@ target_link_libraries(syncwave_tests PRIVATE
 )
 
 add_test(NAME Phase1Tests COMMAND syncwave_tests)
+
+# Desktop GUI Executable (M15)
+add_executable(syncwave_gui WIN32
+    src/gui/main_gui.cpp
+    src/gui/MainWindow.h
+    src/gui/MainWindow.cpp
+)
+
+target_include_directories(syncwave_gui PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+if(MINGW)
+    target_link_options(syncwave_gui PRIVATE -municode)
+endif()
+
+target_link_libraries(syncwave_gui PRIVATE
+    syncwave_core
+    comctl32
+    comdlg32
+)

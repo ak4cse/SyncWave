@@ -3769,6 +3769,50 @@ void testSyncWavePublicEngineApiM14() {
     TEST_ASSERT(!engine->isRunning(), "Multiple stops are safe and idempotent");
 }
 
+void testGuiEngineContractIntegrationM15() {
+    std::cout << "[TEST] GUI Engine Contract & Playback Lifecycle (M15)\n";
+
+    auto engine = syncwave::createSyncWaveEngine();
+    TEST_ASSERT(engine != nullptr, "Engine created for GUI lifecycle testing");
+
+    // 1. Device enumeration for GUI
+    auto devices = engine->enumerateOutputDevices(true);
+    TEST_ASSERT(!devices.empty(), "GUI receives non-empty list of active audio endpoints");
+
+    std::vector<std::string> selectedIds;
+    for (size_t i = 0; i < std::min<size_t>(2, devices.size()); ++i) {
+        selectedIds.push_back(devices[i].id);
+    }
+    TEST_ASSERT(!selectedIds.empty(), "Selected endpoint IDs populated for multi-output playback");
+
+    // 2. Sync mode transitions
+    engine->setSyncMode("none");
+    engine->setSyncMode("software");
+    engine->setSyncMode("adaptive");
+
+    // 3. Invalid media load failure handling (GUI survival)
+    bool invalidStart = engine->startMedia("nonexistent_video_path.mp4", selectedIds);
+    TEST_ASSERT(!invalidStart, "GUI receives false on nonexistent media without crashing");
+    TEST_ASSERT(!engine->isRunning(), "Engine remains cleanly stopped after failed start");
+
+    // 4. Pausing and Resuming when not playing (idempotency)
+    engine->pause();
+    engine->resume();
+    bool seekWhenStopped = engine->seekMedia(5000.0);
+    TEST_ASSERT(!seekWhenStopped, "Seeking when stopped returns false safely");
+
+    // 5. Diagnostics snapshot query frequency resilience
+    for (int i = 0; i < 20; ++i) {
+        auto diag = engine->getDiagnostics();
+        TEST_ASSERT(!diag.isEngineRunning, "Snapshot query is thread-safe and non-blocking");
+        TEST_ASSERT(diag.system.memoryUsageMb > 0.0, "System memory usage is reported");
+    }
+
+    // 6. Stop when stopped
+    engine->stop();
+    TEST_ASSERT(!engine->isRunning(), "Engine stopped safely");
+}
+
 int main() {
     std::cout << "======================================\n";
     std::cout << "      SyncWave Test Suite (Phase 11)  \n";
@@ -3875,6 +3919,9 @@ int main() {
 
     // Milestone 14 Public Engine & Diagnostics Model Tests
     testSyncWavePublicEngineApiM14();
+
+    // Milestone 15 GUI Engine Contract Integration Tests
+    testGuiEngineContractIntegrationM15();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

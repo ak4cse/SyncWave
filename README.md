@@ -53,6 +53,13 @@ SyncWave captures system audio (via WASAPI loopback) or streams containerized me
   - Clean public engine interface (`ISyncWaveEngine`) and complete telemetry snapshot model (`DiagnosticsSnapshot`).
   - Comprehensive operational release runbook (`docs/release.md`) and GUI readiness contract (`docs/gui-api.md`).
   - 1,272 automated unit, regression, and mathematical tests passing with zero failures.
+- [x] **Milestone 15: Desktop GUI Presentation Layer**
+  - High-DPI Windows desktop GUI application (`syncwave_gui.exe`).
+  - Direct multi-device output checkbox selection with friendly names and default endpoint indicators.
+  - Sync mode selector (`Adaptive`, `Software`, `None`) bound directly to the public engine API.
+  - Integrated media player controls (Open File, Play, Pause, Stop, Seek/Scrubber, and timeline progression).
+  - Real-time 10 Hz telemetry dashboard displaying per-endpoint Phase Error, Clock Drift, Active Rate Correction, Confidence, Queue depth, and A/V offset.
+  - Zero coupling with WASAPI, ring buffers, or resamplers; GUI is strictly an asynchronous presentation layer.
 
 ---
 
@@ -86,12 +93,26 @@ $env:PATH = "C:\Program Files\VideoLAN\VLC;C:\msys64\ucrt64\bin;$env:PATH"
 # Configure Release build
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 
-# Build core library, CLI, and test runner
+# Build core library, CLI, test runner, and desktop GUI
 cmake --build build --config Release
 
-# Run complete automated test suite (1,272 tests)
+# Run complete automated test suite (1,319 tests)
 .\build\syncwave_tests.exe
+
+# Launch desktop GUI
+.\build\syncwave_gui.exe
 ```
+
+---
+
+## Desktop GUI Application (M15)
+
+SyncWave includes a high-performance desktop GUI (`syncwave_gui.exe`) engineered as a thin, lock-free presentation layer over `ISyncWaveEngine`:
+
+- **Device Selection**: Multi-select outputs with checkboxes.
+- **Sync Modes**: Switch between `Adaptive`, `Software`, and `None`.
+- **Media Player**: Browse for media files (`.mp4`, `.mkv`, etc.), Play, Pause, Stop, and Seek.
+- **Live Synchronization Telemetry**: Real-time 10 Hz dashboard monitoring Phase Error ($\text{ms}$), Clock Drift ($\text{ppm}$), Sinc Rate Correction ($\text{ppm}$), Filter Confidence, Buffer Queues, and A/V offset.
 
 ---
 
