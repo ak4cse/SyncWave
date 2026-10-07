@@ -85,12 +85,7 @@ struct WasapiOutput::Impl {
     }
 
     void stop() {
-        if (!running.exchange(false, std::memory_order_acq_rel)) {
-            if (state == OutputState::Running) {
-                state = OutputState::Stopped;
-            }
-            return;
-        }
+        running.store(false, std::memory_order_release);
 
         if (hStopEvent) {
             SetEvent(hStopEvent);
@@ -102,6 +97,7 @@ struct WasapiOutput::Impl {
 
         if (pAudioClient) {
             pAudioClient->Stop();
+            pAudioClient->Reset();
         }
 
         state = OutputState::Stopped;
@@ -356,6 +352,10 @@ struct WasapiOutput::Impl {
         framesRendered.store(0);
         underruns.store(0);
         ResetEvent(hStopEvent);
+
+        if (pAudioClient) {
+            pAudioClient->Reset();
+        }
 
         running.store(true, std::memory_order_release);
         renderThread = std::thread(&Impl::renderThreadLoop, this, std::move(callback));

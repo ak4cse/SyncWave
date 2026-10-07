@@ -65,6 +65,11 @@ public:
     void setMaxAllowedPpm(double ppm) { maxAllowedPpm_ = ppm; }
 
     [[nodiscard]] bool hasBaseline() const { return hasBaseline_; }
+    [[nodiscard]] double baselinePhaseOffsetSec() const { return baselinePhaseOffsetSec_; }
+    void setBaselinePhaseOffsetSec(double offsetSec) {
+        baselinePhaseOffsetSec_ = offsetSec;
+        hasBaseline_ = true;
+    }
     [[nodiscard]] double latestFilteredDriftPpm() const { return filteredDriftPpm_; }
     [[nodiscard]] double latestFilteredPhaseErrorSec() const { return filteredPhaseErrorSec_; }
 
@@ -77,6 +82,7 @@ private:
     double emaAlphaPhase_ = 0.20;
 
     bool hasBaseline_ = false;
+    double baselinePhaseOffsetSec_ = 0.0;
     double filteredDriftPpm_ = 0.0;
     double filteredPhaseErrorSec_ = 0.0;
     double lastValidDriftPpm_ = 0.0;

@@ -77,6 +77,18 @@ public:
     // Get a device by index from the latest enumeration
     [[nodiscard]] std::optional<AudioDevice> getDeviceByIndex(size_t index, bool activeOnly = false);
 
+    // Enumerate capture (microphone) endpoints. If activeOnly is true, only returns active devices.
+    [[nodiscard]] std::vector<AudioDevice> enumerateCaptureDevices(bool activeOnly = false);
+
+    // Get the current default audio capture (microphone) endpoint
+    [[nodiscard]] std::optional<AudioDevice> getDefaultCaptureDevice();
+
+    // Get a specific capture device by its opaque endpoint ID
+    [[nodiscard]] std::optional<AudioDevice> getCaptureDeviceById(const std::string& id);
+
+    // Get a capture device by index from the latest capture enumeration
+    [[nodiscard]] std::optional<AudioDevice> getCaptureDeviceByIndex(size_t index, bool activeOnly = false);
+
     // Start listening for real-time Windows Core Audio endpoint notifications
     bool startMonitoring(DeviceEventCallback callback);
 

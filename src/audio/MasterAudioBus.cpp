@@ -46,6 +46,10 @@ void MasterAudioBus::reset() {
     ringBuffer_.reset();
 }
 
+void MasterAudioBus::flush() {
+    ringBuffer_.flush();
+}
+
 size_t MasterAudioBus::availableFrames() const {
     return ringBuffer_.availableToRead();
 }

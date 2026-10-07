@@ -32,6 +32,9 @@ public:
     // Reset buffer state
     void reset();
 
+    // Flush pending unread frames without resetting cumulative written frame counters
+    void flush();
+
     [[nodiscard]] size_t availableFrames() const;
     [[nodiscard]] size_t freeFrames() const;
     [[nodiscard]] size_t capacityFrames() const;

@@ -292,6 +292,9 @@ DeviceOutputTelemetry DeviceOutput::getTelemetry() const {
         t.phaseErrorMs = latestSyncError_.phaseErrorMs;
         t.filteredPhaseErrorMs = latestSyncError_.filteredPhaseErrorMs;
         t.driftConfidence = latestSyncError_.confidence;
+        t.feedforwardTermPpm = latestCorrection_.feedforwardTermPpm;
+        t.proportionalTermPpm = latestCorrection_.proportionalTermPpm;
+        t.commandedPpm = latestCorrection_.commandedPpm;
     }
 
     return t;
@@ -483,6 +486,7 @@ void DeviceOutput::resetDriftCorrection() {
     driftController_.reset();
     latestSyncError_ = SyncError{};
     latestCorrection_ = DriftCorrectionOutput{};
+    nominalLatencySec_ = -1.0;
     setRateAdjustmentPpm(0.0, true);
 }
 
@@ -500,10 +504,14 @@ void DeviceOutput::updateDriftCorrection(double masterTimelineSec, uint64_t mast
 
     double targetSec = 0.0;
     if (targetLatencySec >= 0.0) {
+        nominalLatencySec_ = targetLatencySec;
         targetSec = masterTimelineSec - targetLatencySec;
     } else {
-        auto model = getLatencyModel();
-        targetSec = masterTimelineSec - (model.effectiveLatencyMs / 1000.0);
+        if (nominalLatencySec_ < 0.0) {
+            auto model = getLatencyModel();
+            nominalLatencySec_ = model.effectiveLatencyMs / 1000.0;
+        }
+        targetSec = masterTimelineSec - nominalLatencySec_;
     }
     if (targetSec < 0.0) {
         targetSec = 0.0;

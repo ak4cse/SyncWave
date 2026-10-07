@@ -46,6 +46,11 @@ void RingBuffer::reset() {
     }
 }
 
+void RingBuffer::flush() {
+    size_t w = writeIndex_.load(std::memory_order_acquire);
+    readIndex_.store(w, std::memory_order_release);
+}
+
 size_t RingBuffer::availableToRead() const {
     size_t w = writeIndex_.load(std::memory_order_acquire);
     size_t r = readIndex_.load(std::memory_order_relaxed);

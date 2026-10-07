@@ -33,6 +33,9 @@ public:
     // Reset read and write pointers, clearing the buffer
     void reset();
 
+    // Flush pending unread frames without resetting monotonic total counters
+    void flush();
+
     [[nodiscard]] size_t availableToRead() const;
     [[nodiscard]] size_t availableToWrite() const;
     [[nodiscard]] size_t capacityFrames() const { return capacityFrames_; }

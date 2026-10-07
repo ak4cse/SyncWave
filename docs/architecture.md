@@ -454,3 +454,79 @@ To ensure safety:
    - Control calculations are executed asynchronously on the 10 Hz control loop.
 5. **Physical Acoustic Disclaimer**:
    - Maintains the clear distinction between software buffer alignment / clock rate drift and external physical acoustic latency (RF packetization, DAC filters, speaker room propagation).
+
+---
+
+## 9. Milestone 11: Physical Acoustic Latency Calibration Architecture
+
+Milestone 11 establishes an automated, acoustic measurement and compensation loop to align physical sound arrivals at the listener's ears across heterogeneous audio devices.
+
+```text
+                  +-------------------------------------------------------+
+                  |               AcousticCalibrator                      |
+                  |  Multi-run orchestrator & MAD statistical aggregator  |
+                  +-------------+---------------------------+-------------+
+                                |                           |
+                 (1) Play Chirp |                           | (2) Record Mic Stream
+                                v                           v
+                 +-----------------------+     +-------------------------+
+                 |    ChirpGenerator     |     |     AcousticCapture     |
+                 |  300 Hz -> 8 kHz sweep|     |  Shared Event WASAPI    |
+                 |  Tukey cosine window  |     |  eCapture / Mono Float32|
+                 +-----------+-----------+     +------------+------------+
+                             |                              |
+                             v                              v
+                     [WasapiOutput]                  (Recorded Buffer)
+                             |                              |
+                             v                              |
+                     [Output Device]                        |
+                      (Speaker/Buds)                        |
+                             |                              |
+                      Acoustic Sound                        |
+                             |                              |
+                             v                              v
+                     [Microphone HW] ----------> [CorrelationDetector]
+                                                   - Normalized cross-corr
+                                                   - Sub-sample parabolic
+                                                   - PNR & confidence
+                                                            |
+                                                            v
+                                                 [CalibrationStore]
+                                                   - ~/.syncwave/calibrations.json
+                                                            |
+                                                            v
+                                                 [OutputLatencyModel]
+                                                   L_eff = L_sw + L_cal
+                                                            |
+                                                            v
+                                                 [DelayBuffer] Alignment
+```
+
+### Key Subsystems
+1. **`ChirpGenerator`**:
+   - Synthesizes swept-frequency sine chirps: $f(t) = f_0 + \frac{k}{2}t$ ($300\text{ Hz}$ to $8000\text{ Hz}$ over $150\text{ ms}$).
+   - Tukey cosine windowing (10 ms edges) prevents speaker transducer transients and spectral splatter.
+   - Amplitude strictly capped at $\le 0.50$ (default $0.25$) for acoustic safety.
+   - Lead-in (200 ms) and lead-out (250 ms) silence periods isolate the acoustic sweep.
+2. **`CorrelationDetector`**:
+   - Computes normalized cross-correlation $\gamma[k]$ against reference chirp synthesized at microphone sample rate.
+   - 3-point parabolic peak interpolation: resolves sub-sample peak location $\delta \in (-1, +1)$ with $< 0.02\text{ ms}$ accuracy.
+   - Peak-to-Noise Ratio (PNR): computes noise floor RMS $\sigma_{\text{noise}}$ excluding $\pm 10\text{ ms}$ peak radius.
+   - Detection criteria: $\gamma_{\text{max}} \ge 0.08$, $\text{PNR} \ge 3.0$, and causality gating ($0 \le L \le 800\text{ ms}$).
+3. **`AcousticCapture`**:
+   - Dedicated WASAPI capture client operating in shared event-driven mode (`eCapture` + `AUDCLNT_STREAMFLAGS_EVENTCALLBACK`).
+   - Completely isolated from loopback capture (`WasapiCapture`).
+   - Converts multi-channel hardware formats (Float32, Int16, Int24In32, Int32) into a preallocated mono Float32 buffer.
+   - Zero allocation on the capture thread.
+4. **`AcousticCalibrator`**:
+   - Executes $N = 5\text{ to } 7$ repeated sweeps with 200 ms inter-run settling pauses.
+   - Computes median latency across valid runs.
+   - Rejects multipath and ambient noise outliers using Median Absolute Deviation ($|L_i - \text{median}| > \max(3 \times \text{MAD}, 30\text{ ms})$).
+   - Recomputes mean latency and standard deviation ($\sigma$) uncertainty on retained clean runs.
+5. **`CalibrationStore` & Pipeline Integration**:
+   - Persists calibration records in JSON format at `%USERPROFILE%\.syncwave\calibrations.json`.
+   - `AudioEngine` automatically queries `CalibrationStore` when initializing multi-output routing, injecting $L_{\text{cal}}$ into `OutputLatencyModel` as `optionalCalibrationOffsetMs`.
+   - `OutputLatencyModel` computes static delay offsets:
+     $$D_i = \max_j (L_{\text{software}, j} + L_{\text{cal}, j}) - (L_{\text{software}, i} + L_{\text{cal}, i})$$
+   - Physical acoustic latency compensation is completely decoupled from `DriftController`, which continues to correct digital clock rate variations without disturbance.
+

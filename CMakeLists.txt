@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(SyncWave VERSION 0.10.0 LANGUAGES CXX)
+project(SyncWave VERSION 0.11.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +20,8 @@ set(SYNCWAVE_SYSTEM_LIBS
     ksuser
     avrt
     mfplat
+    winmm
+    psapi
 )
 
 # Core engine library
@@ -62,14 +64,37 @@ add_library(syncwave_core STATIC
     src/sync/SyncController.cpp
     src/dsp/Resampler.h
     src/dsp/Resampler.cpp
+    src/dsp/ChirpGenerator.h
+    src/dsp/ChirpGenerator.cpp
+    src/dsp/CorrelationDetector.h
+    src/dsp/CorrelationDetector.cpp
+    src/windows/AcousticCapture.h
+    src/windows/AcousticCapture.cpp
+    src/sync/CalibrationStore.h
+    src/sync/CalibrationStore.cpp
+    src/sync/AcousticCalibrator.h
+    src/sync/AcousticCalibrator.cpp
+    src/av/AudioTimestamp.h
+    src/av/TimelineModel.h
+    src/av/TimelineModel.cpp
+    src/av/DeterministicMediaSource.h
+    src/av/DeterministicMediaSource.cpp
+    src/av/VlcMediaEngine.h
+    src/av/VlcMediaEngine.cpp
 )
 
 target_include_directories(syncwave_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libvlc/include
+)
+
+target_link_directories(syncwave_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libvlc/lib
 )
 
 target_link_libraries(syncwave_core PUBLIC
     ${SYNCWAVE_SYSTEM_LIBS}
+    vlc
 )
 
 # Main CLI Executable

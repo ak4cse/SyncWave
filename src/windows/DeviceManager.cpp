@@ -168,6 +168,26 @@ struct DeviceManager::Impl : public INotificationListener {
         return defaultId;
     }
 
+    std::string getDefaultCaptureDeviceId() const {
+        if (!pEnumerator) return {};
+
+        ComPtr<IMMDevice> pDefaultDevice;
+        HRESULT hr = pEnumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &pDefaultDevice);
+        if (FAILED(hr) || !pDefaultDevice) {
+            return {};
+        }
+
+        LPWSTR pstrId = nullptr;
+        hr = pDefaultDevice->GetId(&pstrId);
+        if (FAILED(hr) || !pstrId) {
+            return {};
+        }
+
+        std::string defaultId = wideToUtf8(pstrId);
+        CoTaskMemFree(pstrId);
+        return defaultId;
+    }
+
     std::optional<AudioDevice> getDeviceById(const std::string& id) {
         if (!pEnumerator || id.empty()) {
             return std::nullopt;
@@ -379,6 +399,71 @@ std::optional<AudioDevice> DeviceManager::getDeviceById(const std::string& id) {
 
 std::optional<AudioDevice> DeviceManager::getDeviceByIndex(size_t index, bool activeOnly) {
     auto list = enumerateDevices(activeOnly);
+    if (index < list.size()) {
+        return list[index];
+    }
+    return std::nullopt;
+}
+
+std::vector<AudioDevice> DeviceManager::enumerateCaptureDevices(bool activeOnly) {
+    std::vector<AudioDevice> devices;
+    if (!impl_ || !impl_->pEnumerator) {
+        return devices;
+    }
+
+    std::string defaultId = impl_->getDefaultCaptureDeviceId();
+
+    DWORD stateMask = activeOnly ? DEVICE_STATE_ACTIVE : DEVICE_STATEMASK_ALL;
+    ComPtr<IMMDeviceCollection> pCollection;
+    HRESULT hr = impl_->pEnumerator->EnumAudioEndpoints(eCapture, stateMask, &pCollection);
+    if (FAILED(hr) || !pCollection) {
+        return devices;
+    }
+
+    UINT count = 0;
+    hr = pCollection->GetCount(&count);
+    if (FAILED(hr)) {
+        return devices;
+    }
+
+    devices.reserve(count);
+    for (UINT i = 0; i < count; ++i) {
+        ComPtr<IMMDevice> pEndpoint;
+        hr = pCollection->Item(i, &pEndpoint);
+        if (FAILED(hr) || !pEndpoint) {
+            continue;
+        }
+
+        auto device = buildAudioDeviceFromEndpoint(pEndpoint.Get(), defaultId);
+        if (device) {
+            devices.push_back(*device);
+        }
+    }
+
+    return devices;
+}
+
+std::optional<AudioDevice> DeviceManager::getDefaultCaptureDevice() {
+    if (!impl_ || !impl_->pEnumerator) {
+        return std::nullopt;
+    }
+
+    ComPtr<IMMDevice> pDefaultDevice;
+    HRESULT hr = impl_->pEnumerator->GetDefaultAudioEndpoint(eCapture, eConsole, &pDefaultDevice);
+    if (FAILED(hr) || !pDefaultDevice) {
+        return std::nullopt;
+    }
+
+    std::string defaultId = impl_->getDefaultCaptureDeviceId();
+    return buildAudioDeviceFromEndpoint(pDefaultDevice.Get(), defaultId);
+}
+
+std::optional<AudioDevice> DeviceManager::getCaptureDeviceById(const std::string& id) {
+    return getDeviceById(id);
+}
+
+std::optional<AudioDevice> DeviceManager::getCaptureDeviceByIndex(size_t index, bool activeOnly) {
+    auto list = enumerateCaptureDevices(activeOnly);
     if (index < list.size()) {
         return list[index];
     }

@@ -60,6 +60,9 @@ struct DeviceOutputTelemetry {
     double filteredDriftPpm = 0.0;
     double phaseErrorMs = 0.0;
     double filteredPhaseErrorMs = 0.0;
+    double feedforwardTermPpm = 0.0;
+    double proportionalTermPpm = 0.0;
+    double commandedPpm = 0.0;
     double driftConfidence = 0.0;
     SyncState syncState = SyncState::Disabled;
     bool isAvailable = true;
@@ -176,6 +179,7 @@ private:
     std::vector<float> renderScratch_; // Preallocated buffer to eliminate allocations in render callback
     std::atomic<double> calibrationOffsetMs_{0.0};
     std::atomic<SyncState> syncState_{SyncState::Disabled};
+    double nominalLatencySec_ = -1.0;
 
     std::atomic<uint64_t> framesRouted_{0};
     std::atomic<uint64_t> framesConsumed_{0};

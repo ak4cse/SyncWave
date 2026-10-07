@@ -197,6 +197,23 @@ void OutputRouter::onDeviceDisconnected(const std::string& deviceId) {
     }
 }
 
+bool OutputRouter::onDeviceReconnected(const std::string& deviceId) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    for (auto& out : outputs_) {
+        if (out->deviceId() == deviceId) {
+            if (!out->isAvailable() || out->state() != OutputState::Running) {
+                if (out->initialize(masterSampleRate_, masterChannels_)) {
+                    if (driftCorrectionEnabled_.load(std::memory_order_acquire)) {
+                        out->setDriftCorrectionEnabled(true);
+                    }
+                    return out->start();
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool OutputRouter::allRunning() const {
     std::lock_guard<std::mutex> lock(outputMutex_);
     if (outputs_.empty()) return false;

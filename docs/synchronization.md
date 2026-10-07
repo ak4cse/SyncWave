@@ -250,13 +250,79 @@ Conducted on `Headphones (realme Buds T310)` (Bluetooth, 44.1 kHz) and `Speakers
   - `realme Buds T310`: Target adjustment $+100.0\text{ ppm}$, active slewed adjustment reached $+100.0\text{ ppm}$.
   - `Realtek Audio`: Target adjustment $+100.0\text{ ppm}$, active slewed adjustment reached $+100.0\text{ ppm}$.
 
-### Physical Acoustic Latency Honesty Statement:
-Milestone 10 software micro-resampling maintains phase alignment and prevents buffer over/underrun drift within the software audio engine. However, external physical acoustic delays (Bluetooth RF transmission packets, hardware DAC reconstruction filters, room air flight time) remain external to WASAPI. Direct acoustic alignment requires acoustic chirp calibration planned for Milestone 11.
+#### Physical Acoustic Latency Honesty Statement:
+Milestone 10 software micro-resampling maintains phase alignment and prevents buffer over/underrun drift within the software audio engine. However, external physical acoustic delays (Bluetooth RF transmission packets, hardware DAC reconstruction filters, room air flight time) remain external to WASAPI. Direct acoustic alignment requires acoustic chirp calibration implemented in Milestones 11 & 11.1.
 
 ---
 
-## Planned Synchronization Roadmap (Milestone 11+)
+## Milestone 11 & 11.1 Status: Acoustic Arrival Latency Calibration & Two-Device Proof
 
-1. **Milestone 11: Automatic Acoustic Calibration**:
-   - Acoustic chirp / MLS test signal generation and microphone capture for automated end-to-end physical acoustic latency measurement.
-262: 
+> [!IMPORTANT]
+> **Milestones 11 & 11.1 measure and compensate the end-to-end acoustic arrival offset of audio endpoints using swept chirps and reference microphone capture.**
+
+### Scientific Measurement Semantics:
+The measured quantity $L_{\text{arrival}}$ represents the **end-to-end acoustic arrival offset**:
+$$L_{\text{arrival}} = L_{\text{output\_sw}} + L_{\text{DAC/DSP}} + L_{\text{driver}} + L_{\text{air}} + L_{\text{mic\_filter}} + L_{\text{mic\_buffering}}$$
+It is **not** claimed to represent the intrinsic latency of speaker hardware alone. When measuring two outputs with the identical microphone and geometry:
+$$\Delta L = L_{\text{arrival}, A} - L_{\text{arrival}, B} = L_{\text{out}, A} - L_{\text{out}, B}$$
+The common microphone capture latency cancels out completely.
+
+### Subsystem Architecture & Enhancements (M11.1):
+1. **`ChirpGenerator`**:
+   - Synthesizes swept-frequency sine chirps ($300\text{ Hz} \to 8000\text{ Hz}$ over $150\text{ ms}$).
+   - Tukey cosine windowing (10 ms edge ramps) eliminates acoustic pops and spectral splatter.
+   - Amplitude strictly capped at $\le 0.50$ (default $0.25$) for hearing and speaker safety.
+   - 200 ms lead-in and 250 ms lead-out silence margins isolate the acoustic sweep.
+2. **`CorrelationDetector`**:
+   - Computes normalized cross-correlation $\gamma[k]$ against reference template synthesized at microphone sample rate ($f_{\text{mic}}$).
+   - 3-point parabolic peak interpolation provides sub-sample timing accuracy ($< 0.02\text{ ms}$).
+   - Peak-to-Noise Ratio:
+     $$\text{PNR} = \frac{\gamma[k_{\text{max}}]}{\sigma_{\text{noise}}}$$
+   - **Multi-Peak & Reflection Telemetry (M11.1)**: Detects secondary reflection peaks, reporting secondary score, arrival separation ($\Delta t_{\text{ref}}$), and primary-to-secondary ratio to confirm direct path dominance.
+3. **`AcousticCapture`**:
+   - Dedicated WASAPI microphone capture client operating in shared event-driven mode (`eCapture`).
+   - Keeps capture thread alive across sweeps to eliminate thread creation delays.
+   - Converts multi-format inputs (Float32, Int16, Int24, Int32) to preallocated mono Float32 buffer.
+4. **`AcousticCalibrator`**:
+   - Executes multi-run sweeps ($N = 7$ sweeps; requires at least $K \ge 5$ valid runs).
+   - Computes median latency and Median Absolute Deviation (MAD):
+     $$\text{MAD} = \text{median}(|L_i - \text{median}|)$$
+   - Rejects multipath and ambient noise outliers: $|L_i - \text{median}| > \max(3 \times \text{MAD}, 15\text{ ms})$.
+   - Calculates uncertainty metric as standard deviation ($\sigma \le 15.0\text{ ms}$).
+   - Sessions with $< 5$ valid runs are marked `REJECTED` and will **never** overwrite calibration storage.
+5. **`CalibrationStore` & Delay Buffer Integration**:
+   - Persists calibration records in `%USERPROFILE%\.syncwave\calibrations.json`.
+   - `AudioEngine` injects $L_{\text{arrival}}$ into `OutputLatencyModel` as `optionalCalibrationOffsetMs`.
+   - Effective latency model:
+     $$L_{\text{effective}, i} = L_{\text{software}, i} + L_{\text{arrival}, i}$$
+     $$D_i = \max_j L_{\text{effective}, j} - L_{\text{effective}, i}$$
+   - **Direction Verified**: Faster acoustic paths receive positive delay line buffering ($D_i > 0$); slower acoustic paths receive zero delay ($D_j = 0$).
+
+### Verified Host Experiment (Windows 11):
+- **Output A (Realtek Speakers)**:
+  - 5/7 runs valid (161.47, 161.37, 161.68, 162.73, 160.90 ms).
+  - Median arrival: **161.47 ms**, uncertainty: **$\pm 0.68\text{ ms}$**.
+  - Secondary reflection: separated by $\approx 55\text{ ms}$ with peak ratio $> 2.0\times$.
+- **Output B (realme Buds T310 Bluetooth A2DP)**:
+  - 5/7 runs valid.
+  - Median arrival: **131.68 ms**, uncertainty: **$\pm 7.14\text{ ms}$**.
+- **Two-Device Alignment Plan (`syncwave calibrate -O 3,2`)**:
+  - `Speakers (Realtek)`: Delay = **148.88 ms** (7,146 frames).
+  - `Headphones (realme Buds)`: Delay = **0.00 ms** (0 frames).
+  - Target synchronized timeline: **422.34 ms**.
+  - State: `PhysicallyCalibrated`.
+
+---
+
+## Milestone 12: Long-Duration Multi-Output Synchronization Stress Testing
+
+Milestone 12 validated the long-duration stability, multi-endpoint scalability, and fault tolerance of SyncWave's synchronization engine across physical host endpoints (`Speakers (Realtek(R) Audio)`, `Headphones (realme Buds T310)`, and `Speakers (Steam Streaming Speakers)`).
+
+### Comparative Baseline: Uncompensated vs. Adaptive Correction (180s)
+- **Uncompensated (`--sync none`)**: Clock frequency mismatches accumulate linearly. Phase error on Realtek exploded from $0\text{ ms}$ to **$140.19\text{ ms}$**, diverging by **$142.53\text{ ms}$** relative to realme Buds within 3 minutes. Output queues saturated towards capacity.
+- **Adaptive Drift Correction (`--sync adaptive`)**: The linear regression estimator and proportional resampler controller actively adjusted playback speeds (Realtek mean $+86.4\text{ ppm}$, Buds mean $+24.5\text{ ppm}$). The inter-device phase delta was held to a mean of **$12.82\text{ ms}$** (ending at **$8.07\text{ ms}$**), preventing divergence.
+- **Hardware Stability**: 0 WASAPI hardware underruns, 0 queue overruns, and strictly bounded memory ($\sim 16.8\text{ MB}$, growth $\le 0.6\text{ MB}$).
+
+### Fault Injection & Dynamic Reconnect
+- Live endpoint removal (`onDeviceDisconnected`) safely drops the disconnected endpoint without interrupting playback on remaining devices.
+- Live peripheral re-insertion (`onDeviceReconnected`) re-initializes and aligns the endpoint into the active `MasterAudioBus` without restarting the engine.

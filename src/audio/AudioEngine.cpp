@@ -1,6 +1,11 @@
 #include "AudioEngine.h"
 #include "../windows/WasapiCapture.h"
+#include "../sync/CalibrationStore.h"
 #include <chrono>
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <timeapi.h>
 
 namespace syncwave {
 
@@ -14,6 +19,7 @@ AudioEngine::~AudioEngine() {
 }
 
 void AudioEngine::producerLoop() {
+    timeBeginPeriod(1);
     constexpr size_t CHUNK_SIZE = 480; // ~10ms chunk @ 48kHz
     const auto busFormat = masterBus_.format();
     std::vector<float> chunk(CHUNK_SIZE * busFormat.channels, 0.0f);
@@ -23,24 +29,29 @@ void AudioEngine::producerLoop() {
     uint32_t loopTick = 0;
 
     while (producerRunning_.load(std::memory_order_acquire)) {
-        size_t freeSpace = masterBus_.freeFrames();
-        if (freeSpace >= CHUNK_SIZE) {
-            if (isPulseMode_) {
-                pulseGen_.generateFrames(chunk.data(), CHUNK_SIZE, busFormat.channels);
-            } else {
-                toneGen_.generateFrames(reinterpret_cast<uint8_t*>(chunk.data()), CHUNK_SIZE, busFormat);
+        auto now = std::chrono::steady_clock::now();
+        while (nextTick <= now && producerRunning_.load(std::memory_order_relaxed)) {
+            size_t freeSpace = masterBus_.freeFrames();
+            if (freeSpace >= CHUNK_SIZE) {
+                if (isPulseMode_) {
+                    pulseGen_.generateFrames(chunk.data(), CHUNK_SIZE, busFormat.channels);
+                } else {
+                    toneGen_.generateFrames(reinterpret_cast<uint8_t*>(chunk.data()), CHUNK_SIZE, busFormat);
+                }
+                masterBus_.write(chunk.data(), CHUNK_SIZE);
+                router_.dispatch(masterBus_);
             }
-            masterBus_.write(chunk.data(), CHUNK_SIZE);
-            router_.dispatch(masterBus_);
+            nextTick += chunkDuration;
+            if (++loopTick == 10 && autoSyncRequested_) {
+                alignSoftwareLatencies();
+            } else if (loopTick % 10 == 0) {
+                router_.sampleAllClocks();
+            }
         }
 
-        if (++loopTick % 10 == 0) {
-            router_.sampleAllClocks();
-        }
-
-        nextTick += chunkDuration;
         std::this_thread::sleep_until(nextTick);
     }
+    timeEndPeriod(1);
 }
 
 bool AudioEngine::startTone(const AudioDevice& device, const ToneParameters& params) {
@@ -254,6 +265,10 @@ void AudioEngine::onDeviceDisconnected(const std::string& deviceId) {
     router_.onDeviceDisconnected(deviceId);
 }
 
+bool AudioEngine::onDeviceReconnected(const std::string& deviceId) {
+    return router_.onDeviceReconnected(deviceId);
+}
+
 void AudioEngine::sampleClocks() {
     router_.sampleAllClocks();
 }
@@ -380,8 +395,18 @@ bool AudioEngine::isDriftCorrectionEnabled() const {
 }
 
 void AudioEngine::applyPendingSync() {
-    for (size_t i = 0; i < pendingCalibrationOffsets_.size(); ++i) {
-        router_.setDeviceCalibrationOffsetMs(i, pendingCalibrationOffsets_[i]);
+    CalibrationStore store;
+    auto currentModels = router_.getLatencyModels();
+
+    for (size_t i = 0; i < currentModels.size(); ++i) {
+        if (i < pendingCalibrationOffsets_.size()) {
+            router_.setDeviceCalibrationOffsetMs(i, pendingCalibrationOffsets_[i]);
+        } else {
+            auto rec = store.get(currentModels[i].deviceId);
+            if (rec && rec->confidence >= 0.35f) {
+                router_.setDeviceCalibrationOffsetMs(i, rec->measuredLatencyMs);
+            }
+        }
     }
 
     if (!pendingManualDelays_.empty()) {

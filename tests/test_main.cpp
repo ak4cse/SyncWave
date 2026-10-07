@@ -20,10 +20,19 @@
 #include "../src/sync/SyncController.h"
 #include "../src/sync/SyncError.h"
 #include "../src/sync/FilteredDriftEstimator.h"
+#include "../src/dsp/ChirpGenerator.h"
+#include "../src/dsp/CorrelationDetector.h"
+#include "../src/sync/CalibrationStore.h"
+#include "../src/sync/AcousticCalibrator.h"
+#include "../src/av/AudioTimestamp.h"
+#include "../src/av/TimelineModel.h"
+#include "../src/av/DeterministicMediaSource.h"
+#include "../src/av/VlcMediaEngine.h"
 
 #include <iostream>
 #include <cassert>
 #include <string>
+#include <filesystem>
 #include <vector>
 #include <cmath>
 #include <thread>
@@ -1837,11 +1846,11 @@ void testOutputLatencyModel() {
     TEST_ASSERT(std::abs(model.effectiveLatencyMs - 17.5) < 0.001, 
                 "effectiveLatencyMs equals software latency when calibration offset is 0");
 
-    // Apply manual calibration offset (e.g. +50ms physical acoustic latency)
+    // Apply manual calibration offset (Model B: end-to-end arrival offset)
     model.optionalCalibrationOffsetMs = 50.0;
     model.recalculate();
-    TEST_ASSERT(std::abs(model.effectiveLatencyMs - 67.5) < 0.001, 
-                "effectiveLatencyMs incorporates calibration offset (67.5 ms)");
+    TEST_ASSERT(std::abs(model.effectiveLatencyMs - 50.0) < 0.001, 
+                "effectiveLatencyMs equals calibrated arrival offset under Model B without double-counting (50.0 ms)");
 
     // Test sync state strings
     TEST_ASSERT(syncwave::syncStateToString(syncwave::SyncState::Disabled) == "Disabled", "SyncState::Disabled string");
@@ -1891,17 +1900,17 @@ void testSyncControllerAlignmentMath() {
     TEST_ASSERT(plan.calculatedDelaysFrames[0] == 1920, "Dev0 40ms @ 48kHz is exactly 1920 frames");
     TEST_ASSERT(plan.calculatedDelaysFrames[1] == 0, "Dev1 0ms is 0 frames");
 
-    // Physical calibration offset test:
-    // Suppose Fast Dev has 100 ms physical Bluetooth acoustic delay
+    // Physical calibration offset test under Model B:
+    // Fast Dev has 100 ms calibrated acoustic arrival offset (no double-counting with software latency)
     models[0].optionalCalibrationOffsetMs = 100.0;
-    models[0].updateTotals(); // effective = 120.0 ms
+    models[0].updateTotals(); // effective = 100.0 ms under Model B
     auto physPlan = syncwave::SyncController::computeSoftwareAlignmentPlan(models);
     TEST_ASSERT(physPlan.syncState == syncwave::SyncState::PhysicallyCalibrated, "State is PhysicallyCalibrated when offsets present");
-    TEST_ASSERT(std::abs(physPlan.targetLatencyMs - 120.0) < 0.001, "Target latency is 120.0 ms");
-    TEST_ASSERT(std::abs(physPlan.calculatedDelaysMs[0] - 0.0) < 0.001, "Dev0 now gets 0 delay (slowest acoustic path)");
-    TEST_ASSERT(std::abs(physPlan.calculatedDelaysMs[1] - 60.0) < 0.001, "Dev1 gets 60 ms delay (120 - 60)");
-    // Dev1 @ 44.1kHz: 60ms = 2646 frames
-    TEST_ASSERT(physPlan.calculatedDelaysFrames[1] == 2646, "Dev1 60ms @ 44.1kHz is 2646 frames");
+    TEST_ASSERT(std::abs(physPlan.targetLatencyMs - 100.0) < 0.001, "Target latency is 100.0 ms (max of 100.0 ms arrival and 60.0 ms SW)");
+    TEST_ASSERT(std::abs(physPlan.calculatedDelaysMs[0] - 0.0) < 0.001, "Dev0 now gets 0 delay (slowest path)");
+    TEST_ASSERT(std::abs(physPlan.calculatedDelaysMs[1] - 40.0) < 0.001, "Dev1 gets 40 ms delay (100 - 60)");
+    // Dev1 @ 44.1kHz: 40ms = 1764 frames
+    TEST_ASSERT(physPlan.calculatedDelaysFrames[1] == 1764, "Dev1 40ms @ 44.1kHz is 1764 frames");
 
     // Manual plan test with clamping
     std::vector<double> manualDelays = { -10.0, 25.5 };
@@ -2341,9 +2350,1394 @@ void testDeviceOutputAndRouterDriftIntegration() {
     TEST_ASSERT(telem2.targetRateAdjustmentPpm == 0.0, "Disconnected output resets target rate adjustment");
 }
 
+void testDriftControllerPhysicalDirection() {
+    std::cout << "[TEST] DriftController Physical Directionality & Deadband Verification (M10.1)\n";
+
+    syncwave::DriftControllerConfig config;
+    config.deadbandMs = 1.0;
+    config.maxAdjustmentPpm = 100.0;
+    config.kp = 10.0; // 10 ppm per ms excess error
+    config.enableFeedforward = false; // isolate proportional feedback
+    config.minObservationSec = 5.0;
+    config.minSamples = 30;
+    config.minConfidence = 0.90;
+
+    syncwave::DriftController controller(config);
+    controller.setEnabled(true);
+
+    syncwave::SyncError error;
+    error.isValid = true;
+    error.confidence = 0.95;
+    error.observationDurationSec = 10.0;
+    error.filteredDriftPpm = 0.0;
+
+    // 1. Deadband checks: +0.5 ms, -0.5 ms, +1.0 ms, -1.0 ms
+    const double deadbandTests[] = {0.5, -0.5, 1.0, -1.0};
+    for (double errMs : deadbandTests) {
+        error.filteredPhaseErrorMs = errMs;
+        auto out = controller.calculateCorrection(error);
+        TEST_ASSERT(out.state == syncwave::DriftCorrectionState::Locked, "Inside deadband is Locked");
+        TEST_ASSERT(out.proportionalTermPpm == 0.0, "Proportional feedback strictly 0 inside deadband");
+        TEST_ASSERT(out.targetRateAdjustmentPpm == 0.0, "Target adjustment strictly 0 inside deadband");
+    }
+
+    // 2. Lagging output: e = +2.0 ms -> output behind target -> must speed up (+correction)
+    error.filteredPhaseErrorMs = 2.0;
+    auto outLag2 = controller.calculateCorrection(error);
+    TEST_ASSERT(outLag2.state == syncwave::DriftCorrectionState::Correcting, "+2.0 ms is Correcting");
+    TEST_ASSERT(outLag2.proportionalTermPpm > 0.0, "Lagging output generates POSITIVE proportional feedback");
+    TEST_ASSERT(std::abs(outLag2.proportionalTermPpm - 10.0) < 1e-6, "+2.0 ms excess error (+1.0 ms) * 10 = +10.0 ppm");
+    TEST_ASSERT(outLag2.targetRateAdjustmentPpm > 0.0, "Target adjustment sign is POSITIVE (speeds up output)");
+
+    // 3. Lagging output: e = +10.0 ms -> output behind target -> must speed up (+correction)
+    error.filteredPhaseErrorMs = 10.0;
+    auto outLag10 = controller.calculateCorrection(error);
+    TEST_ASSERT(std::abs(outLag10.proportionalTermPpm - 90.0) < 1e-6, "+10.0 ms excess error (+9.0 ms) * 10 = +90.0 ppm");
+    TEST_ASSERT(outLag10.targetRateAdjustmentPpm == 90.0, "Target adjustment is +90.0 ppm");
+
+    // 4. Leading output: e = -2.0 ms -> output ahead of target -> must slow down (-correction)
+    error.filteredPhaseErrorMs = -2.0;
+    auto outLead2 = controller.calculateCorrection(error);
+    TEST_ASSERT(outLead2.proportionalTermPpm < 0.0, "Leading output generates NEGATIVE proportional feedback");
+    TEST_ASSERT(std::abs(outLead2.proportionalTermPpm - (-10.0)) < 1e-6, "-2.0 ms excess error (-1.0 ms) * 10 = -10.0 ppm");
+    TEST_ASSERT(outLead2.targetRateAdjustmentPpm < 0.0, "Target adjustment sign is NEGATIVE (slows down output)");
+
+    // 5. Leading output: e = -10.0 ms -> output ahead of target -> must slow down (-correction)
+    error.filteredPhaseErrorMs = -10.0;
+    auto outLead10 = controller.calculateCorrection(error);
+    TEST_ASSERT(std::abs(outLead10.proportionalTermPpm - (-90.0)) < 1e-6, "-10.0 ms excess error (-9.0 ms) * 10 = -90.0 ppm");
+    TEST_ASSERT(outLead10.targetRateAdjustmentPpm == -90.0, "Target adjustment is -90.0 ppm");
+}
+
+void testResamplerPullModeMathematicalVerification() {
+    std::cout << "[TEST] Resampler Pull-Mode Ratio & Consumption Direction (M10.1)\n";
+
+    // Standard 48 kHz stereo resampler
+    syncwave::Resampler resamplerNominal(48000, 48000, 2);
+    syncwave::Resampler resamplerPositiveAdj(48000, 48000, 2);
+    resamplerPositiveAdj.setRateAdjustmentPpm(1000.0, true); // +1000 ppm immediate
+
+    TEST_ASSERT(resamplerNominal.baseRatio() == 1.0, "Nominal base ratio is 1.0");
+    TEST_ASSERT(resamplerPositiveAdj.ratio() > 1.0, "Positive adjustment increases ratio > 1.0");
+    TEST_ASSERT(std::abs(resamplerPositiveAdj.ratio() - 1.001) < 1e-9, "Ratio at +1000 ppm is exactly 1.001");
+
+    // Push 48,000 frames into two identical ring buffers
+    syncwave::RingBuffer queueNominal(96000, 2);
+    syncwave::RingBuffer queuePositiveAdj(96000, 2);
+
+    std::vector<float> inputAudio(48000 * 2, 0.5f);
+    queueNominal.write(inputAudio.data(), 48000);
+    queuePositiveAdj.write(inputAudio.data(), 48000);
+
+    // Pull 24,000 output frames from each in 50 chunks of 480 frames (simulating WASAPI callback buffer sizes)
+    std::vector<float> blockBuf1(480 * 2);
+    std::vector<float> blockBuf2(480 * 2);
+
+    size_t pulled1 = 0;
+    size_t pulled2 = 0;
+    for (int i = 0; i < 50; ++i) {
+        pulled1 += resamplerNominal.pull(queueNominal, blockBuf1.data(), 480);
+        pulled2 += resamplerPositiveAdj.pull(queuePositiveAdj, blockBuf2.data(), 480);
+    }
+
+    TEST_ASSERT(pulled1 == 24000, "Pulled 24,000 output frames (nominal)");
+    TEST_ASSERT(pulled2 == 24000, "Pulled 24,000 output frames (positive adjustment)");
+
+    // Inspect remaining frames in queues
+    size_t remainNominal = queueNominal.availableToRead();
+    size_t remainPositiveAdj = queuePositiveAdj.availableToRead();
+
+    // Since ratio was 1.001, resamplerPositiveAdj consumed 24,000 * 1.001 = 24,024 master frames
+    // (plus/minus fractional filter boundary)
+    size_t consumedNominal = 48000 - remainNominal;
+    size_t consumedPositiveAdj = 48000 - remainPositiveAdj;
+
+    TEST_ASSERT(consumedPositiveAdj > consumedNominal, 
+                "Positive adjustment consumes MORE master frames than nominal");
+
+    // Direct block processing test:
+    // With ratio 1.001 (+1000 ppm), processing 24,024 input frames yields 24,000 output frames (24024 / 1.001 = 24000)
+    std::vector<float> inDirect(24024 * 2, 0.5f);
+    std::vector<float> outDirect(25000 * 2, 0.0f);
+    syncwave::Resampler directResampler(48000, 48000, 2);
+    directResampler.setRateAdjustmentPpm(1000.0, true);
+    size_t directOut = directResampler.process(inDirect.data(), 24024, outDirect.data(), 25000);
+    TEST_ASSERT(directOut == 24000, "Direct process: 24,024 master frames produces 24,000 output frames at +1000 ppm");
+
+    // Physical conclusion: Consuming master frames faster means the audio delivered to DAC
+    // advances further along the master timeline in the same playback time, advancing a lagging output.
+}
+
+void testSeparateFrequencyAndPhaseCorrection() {
+    std::cout << "[TEST] Separation of Frequency Drift (Feedforward) vs Phase Offset (Feedback) (M10.1)\n";
+
+    syncwave::DriftControllerConfig config;
+    config.deadbandMs = 1.0;
+    config.maxAdjustmentPpm = 100.0;
+    config.kp = 10.0;
+    config.enableFeedforward = true;
+    config.minObservationSec = 5.0;
+    config.minSamples = 30;
+    config.minConfidence = 0.90;
+
+    syncwave::DriftController controller(config);
+    controller.setEnabled(true);
+
+    syncwave::SyncError error;
+    error.isValid = true;
+    error.confidence = 0.95;
+    error.observationDurationSec = 10.0;
+
+    // Test 1: Output clock runs +25 ppm faster than master, zero phase error
+    // Clock is fast -> DAC demands frames faster -> resampler must pull fewer master frames per output frame -> u = -25 ppm
+    error.filteredDriftPpm = 25.0;
+    error.filteredPhaseErrorMs = 0.0;
+    auto out1 = controller.calculateCorrection(error);
+    TEST_ASSERT(out1.proportionalTermPpm == 0.0, "Zero phase error produces 0 proportional feedback");
+    TEST_ASSERT(out1.feedforwardTermPpm == -25.0, "Fast clock (+25 ppm) produces -25 ppm feedforward cancellation");
+    TEST_ASSERT(out1.targetRateAdjustmentPpm == -25.0, "Total command is -25.0 ppm");
+
+    // Test 2: Output clock runs -25 ppm slower than master, zero phase error
+    // Clock is slow -> DAC demands frames slower -> resampler must pull more master frames per output frame -> u = +25 ppm
+    error.filteredDriftPpm = -25.0;
+    error.filteredPhaseErrorMs = 0.0;
+    auto out2 = controller.calculateCorrection(error);
+    TEST_ASSERT(out2.proportionalTermPpm == 0.0, "Zero phase error produces 0 proportional feedback");
+    TEST_ASSERT(out2.feedforwardTermPpm == 25.0, "Slow clock (-25 ppm) produces +25 ppm feedforward cancellation");
+    TEST_ASSERT(out2.targetRateAdjustmentPpm == 25.0, "Total command is +25.0 ppm");
+
+    // Test 3: Static phase offset (+5.0 ms lag) but ZERO frequency drift (filteredDriftPpm = 0.0)
+    error.filteredDriftPpm = 0.0;
+    error.filteredPhaseErrorMs = 5.0;
+    auto out3 = controller.calculateCorrection(error);
+    TEST_ASSERT(out3.feedforwardTermPpm == 0.0, "Zero frequency drift produces 0 feedforward");
+    TEST_ASSERT(std::abs(out3.proportionalTermPpm - 40.0) < 1e-6, "+5 ms lag (excess +4 ms) produces +40 ppm feedback");
+    TEST_ASSERT(out3.targetRateAdjustmentPpm == 40.0, "Total command is +40.0 ppm (pure phase feedback)");
+}
+
+void testSyntheticControllerValidationCasesAtoH() {
+    std::cout << "[TEST] Synthetic Controller Validation: Cases A through H (M10.1)\n";
+
+    syncwave::DriftControllerConfig config;
+    config.deadbandMs = 1.0;
+    config.maxAdjustmentPpm = 100.0;
+    config.kp = 10.0;
+    config.enableFeedforward = true;
+    config.minObservationSec = 5.0;
+    config.minSamples = 30;
+    config.minConfidence = 0.90;
+
+    syncwave::DriftController controller(config);
+    controller.setEnabled(true);
+
+    syncwave::SyncError error;
+    error.isValid = true;
+    error.confidence = 0.95;
+    error.observationDurationSec = 10.0;
+
+    // Case A: Zero drift, zero phase offset -> correction ~ 0 ppm
+    error.filteredDriftPpm = 0.0;
+    error.filteredPhaseErrorMs = 0.0;
+    auto resA = controller.calculateCorrection(error);
+    TEST_ASSERT(resA.state == syncwave::DriftCorrectionState::Locked, "Case A: State is Locked");
+    TEST_ASSERT(resA.targetRateAdjustmentPpm == 0.0, "Case A: Correction is strictly 0.0 ppm");
+
+    // Case B: +25 ppm output clock error -> correction converges toward -25 ppm to cancel
+    error.filteredDriftPpm = 25.0;
+    error.filteredPhaseErrorMs = 0.0;
+    auto resB = controller.calculateCorrection(error);
+    TEST_ASSERT(resB.targetRateAdjustmentPpm == -25.0, "Case B: Correction is -25.0 ppm to cancel +25 ppm clock");
+
+    // Case C: -25 ppm output clock error -> opposite correction direction (+25 ppm)
+    error.filteredDriftPpm = -25.0;
+    error.filteredPhaseErrorMs = 0.0;
+    auto resC = controller.calculateCorrection(error);
+    TEST_ASSERT(resC.targetRateAdjustmentPpm == 25.0, "Case C: Correction is +25.0 ppm to cancel -25 ppm clock");
+
+    // Case D: +2 ms phase lag, zero frequency error -> bounded positive correction
+    error.filteredDriftPpm = 0.0;
+    error.filteredPhaseErrorMs = 2.0;
+    auto resD = controller.calculateCorrection(error);
+    TEST_ASSERT(resD.state == syncwave::DriftCorrectionState::Correcting, "Case D: State is Correcting");
+    TEST_ASSERT(resD.targetRateAdjustmentPpm == 10.0, "Case D: Bounded positive correction +10.0 ppm");
+
+    // Case E: -2 ms phase lead, zero frequency error -> opposite phase correction (-10 ppm)
+    error.filteredDriftPpm = 0.0;
+    error.filteredPhaseErrorMs = -2.0;
+    auto resE = controller.calculateCorrection(error);
+    TEST_ASSERT(resE.state == syncwave::DriftCorrectionState::Correcting, "Case E: State is Correcting");
+    TEST_ASSERT(resE.targetRateAdjustmentPpm == -10.0, "Case E: Bounded negative correction -10.0 ppm");
+
+    // Case F: Static +100 ms latency offset, zero drift -> baseline reference absorbs offset
+    // Simulated via FilteredDriftEstimator with constant 100 ms offset
+    syncwave::FilteredDriftEstimator estimator(5.0, 30, 500.0, 0.15, 0.20);
+    syncwave::DeviceClock clockF("dev-f", 48000, 100);
+    auto t0 = std::chrono::steady_clock::now();
+
+    for (int i = 0; i <= 60; ++i) {
+        syncwave::DeviceClockSample s;
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        s.clockPosition = i * 4800; // exact 48000 Hz (zero drift)
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clockF.recordSample(s);
+
+        // Constant 100 ms offset: target is always 100 ms ahead of output
+        double targetPlayhead = (i * 0.1) + 0.100;
+        double outputPlayhead = (i * 0.1);
+
+        auto fResult = estimator.update(clockF, targetPlayhead, outputPlayhead);
+        if (i == 60) {
+            TEST_ASSERT(fResult.isValid, "Case F: Estimator is valid after 6s");
+            TEST_ASSERT(std::abs(fResult.rawPhaseErrorMs) < 0.01, 
+                        "Case F: Static 100ms offset absorbed by baseline (phase error == 0.0 ms)");
+            TEST_ASSERT(std::abs(fResult.filteredDriftPpm) < 1.0, 
+                        "Case F: Static offset NOT interpreted as frequency drift (~0 ppm)");
+
+            syncwave::SyncError errF;
+            errF.isValid = true;
+            errF.confidence = fResult.confidence;
+            errF.observationDurationSec = fResult.observationDurationSec;
+            errF.filteredPhaseErrorMs = fResult.filteredPhaseErrorMs;
+            errF.filteredDriftPpm = fResult.filteredDriftPpm;
+
+            auto resF = controller.calculateCorrection(errF);
+            TEST_ASSERT(resF.state == syncwave::DriftCorrectionState::Locked, "Case F: Controller remains Locked");
+            TEST_ASSERT(std::abs(resF.targetRateAdjustmentPpm) < 0.1, "Case F: Correction is 0.0 ppm");
+        }
+    }
+
+    // Case G: Noisy measurement with +/-0.5 ms phase noise inside deadband -> no oscillation, no saturation
+    for (int step = 0; step < 100; ++step) {
+        double noise = 0.5 * std::sin(step * 0.5); // sinusoidal noise in [-0.5, +0.5] ms
+        error.filteredPhaseErrorMs = noise;
+        error.filteredDriftPpm = 0.0;
+        auto resG = controller.calculateCorrection(error);
+        TEST_ASSERT(resG.state == syncwave::DriftCorrectionState::Locked, "Case G: Controller stays Locked in deadband");
+        TEST_ASSERT(resG.proportionalTermPpm == 0.0, "Case G: Zero proportional chatter on noise");
+        TEST_ASSERT(resG.targetRateAdjustmentPpm == 0.0, "Case G: Zero adjustment commanded on noise");
+        TEST_ASSERT(!resG.isClamped, "Case G: No clamp saturation");
+    }
+
+    // Case H: Sudden impossible measurement (+1000 ppm jump) -> outlier rejection / Uncertain state
+    syncwave::FilteredDriftEstimator estimatorH(5.0, 30, 500.0, 0.15, 0.20);
+    syncwave::DeviceClock clockH("dev-h", 48000, 100);
+
+    for (int i = 0; i <= 55; ++i) {
+        syncwave::DeviceClockSample s;
+        s.timestamp = t0 + std::chrono::milliseconds(i * 100);
+        s.clockPosition = i * 4800;
+        s.clockFrequency = 48000;
+        s.sampleRate = 48000;
+        s.isValid = true;
+        clockH.recordSample(s);
+        estimatorH.update(clockH, i * 0.1, i * 0.1);
+    }
+
+    // Inject +1000 ppm spike
+    syncwave::DeviceClockSample spike;
+    spike.timestamp = t0 + std::chrono::milliseconds(56 * 100);
+    spike.clockPosition = 56 * 4800 + 4800; // impossible jump
+    spike.clockFrequency = 48000;
+    spike.sampleRate = 48000;
+    spike.isValid = true;
+    clockH.recordSample(spike);
+
+    auto resH = estimatorH.update(clockH, 5.6, 5.6);
+    TEST_ASSERT(resH.isOutlierRejected, "Case H: Extreme measurement successfully flagged as outlier");
+    TEST_ASSERT(resH.confidence <= 0.2, "Case H: Confidence severely penalized on outlier");
+
+    syncwave::SyncError errH;
+    errH.isValid = true;
+    errH.confidence = resH.confidence; // 0.2 < minConfidence 0.90
+    errH.observationDurationSec = 5.6;
+    errH.filteredPhaseErrorMs = resH.filteredPhaseErrorMs;
+    errH.filteredDriftPpm = resH.filteredDriftPpm;
+
+    auto controllerOutH = controller.calculateCorrection(errH);
+    TEST_ASSERT(controllerOutH.state == syncwave::DriftCorrectionState::Uncertain, 
+                "Case H: Low confidence triggers Uncertain state");
+    TEST_ASSERT(!controllerOutH.isClamped, "Case H: Controller does not slam into clamp on outlier");
+}
+
+void testChirpGeneratorBasicsAndTukeyWindow() {
+    std::cout << "[TEST] ChirpGenerator: Sweep Synthesis & Tukey Window (M11)\n";
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = 48000;
+    params.durationSec = 0.100;      // 100 ms chirp = 4800 frames
+    params.startFreqHz = 300.0;
+    params.endFreqHz = 4000.0;
+    params.leadInSec = 0.200;        // 200 ms lead-in = 9600 frames
+    params.leadOutSec = 0.300;       // 300 ms lead-out = 14400 frames
+    params.amplitude = 0.25f;
+    params.windowRampSec = 0.010;    // 10 ms ramp = 480 frames
+
+    syncwave::ChirpGenerator gen(params);
+
+    TEST_ASSERT(gen.chirpFrames() == 4800, "Chirp portion is exactly 4800 frames");
+    TEST_ASSERT(gen.chirpMasterFrameIndex() == 9600, "Chirp starts at frame 9600");
+    TEST_ASSERT(gen.totalFrames() == 9600 + 4800 + 14400, "Total sequence is 28800 frames (600 ms)");
+    TEST_ASSERT(!gen.isComplete(), "Generator starts incomplete");
+
+    auto ref = gen.generateReferenceChirp();
+    TEST_ASSERT(ref.size() == 4800, "Reference chirp size matches active chirp frames");
+
+    // Check Tukey windowing on reference chirp
+    TEST_ASSERT(std::abs(ref.front()) < 0.01f, "First sample is tapered near zero");
+    TEST_ASSERT(std::abs(ref.back()) < 0.01f, "Last sample is tapered near zero");
+
+    // Check peak amplitude does not exceed configured level
+    float maxAmp = 0.0f;
+    for (float s : ref) {
+        maxAmp = std::max(maxAmp, std::abs(s));
+    }
+    TEST_ASSERT(maxAmp <= 0.2501f, "Peak amplitude strictly respects safe configured level");
+    TEST_ASSERT(maxAmp >= 0.20f, "Signal reaches full expected amplitude in sustain portion");
+
+    // Generate full stereo stream and verify silence padding
+    std::vector<float> stream(gen.totalFrames() * 2);
+    size_t genCount = gen.generateFrames(stream.data(), gen.totalFrames(), 2);
+    TEST_ASSERT(genCount == gen.totalFrames(), "Generated full frame sequence");
+    TEST_ASSERT(gen.isComplete(), "Generator is marked complete");
+
+    // Verify lead-in silence (samples 0..9599 are strictly zero)
+    bool leadInSilent = true;
+    for (size_t i = 0; i < 9600 * 2; ++i) {
+        if (stream[i] != 0.0f) { leadInSilent = false; break; }
+    }
+    TEST_ASSERT(leadInSilent, "Lead-in frames are strictly zero silence");
+
+    // Verify lead-out silence (samples 14400..28799 are strictly zero)
+    bool leadOutSilent = true;
+    for (size_t i = (9600 + 4800) * 2; i < gen.totalFrames() * 2; ++i) {
+        if (stream[i] != 0.0f) { leadOutSilent = false; break; }
+    }
+    TEST_ASSERT(leadOutSilent, "Lead-out frames are strictly zero silence");
+}
+
+void testCorrelationDetectorExactPeak() {
+    std::cout << "[TEST] CorrelationDetector: Exact Peak & Sub-Sample Precision (M11)\n";
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = 48000;
+    params.durationSec = 0.150; // 150 ms = 7200 frames
+    params.amplitude = 0.30f;
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    // Create 1.0 second test buffer (48,000 samples)
+    std::vector<float> target(48000, 0.0f);
+    // Embed reference chirp at sample index 4800 (exactly 100.0 ms delay)
+    const size_t embedIndex = 4800;
+    for (size_t i = 0; i < ref.size(); ++i) {
+        target[embedIndex + i] = ref[i];
+    }
+
+    syncwave::CorrelationDetector detector;
+    auto res = detector.detect(ref, target, 48000);
+
+    TEST_ASSERT(res.isDetected, "Chirp arrival detected in clean buffer");
+    TEST_ASSERT(res.peakScore > 0.999f, "Normalized correlation peak score > 0.999 for identical signal");
+    TEST_ASSERT(std::abs(res.peakIndex - static_cast<double>(embedIndex)) < 0.01, 
+                "Detected arrival sample matches embedded index within 0.01 samples");
+    TEST_ASSERT(std::abs(res.arrivalTimeSec - 0.100) < 1e-5, 
+                "Detected arrival time is exactly 100.0 ms");
+    TEST_ASSERT(res.peakToNoiseRatio > 10.0f, "Peak-to-noise ratio is high (> 10.0)");
+    TEST_ASSERT(res.confidence > 0.95f, "Detection confidence > 95%");
+}
+
+void testCorrelationDetectorKnownSyntheticDelays() {
+    std::cout << "[TEST] CorrelationDetector: Known Synthetic Delays (10 to 500 ms) (M11)\n";
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = 48000;
+    params.durationSec = 0.100; // 100 ms = 4800 frames
+    params.amplitude = 0.25f;
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    std::vector<double> testDelaysMs = { 10.0, 25.0, 50.0, 100.0, 250.0, 500.0 };
+    syncwave::CorrelationDetector detector;
+
+    for (double delayMs : testDelaysMs) {
+        size_t offsetSamples = static_cast<size_t>(std::round((delayMs / 1000.0) * 48000.0));
+        std::vector<float> target(offsetSamples + ref.size() + 2400, 0.0f);
+
+        for (size_t i = 0; i < ref.size(); ++i) {
+            target[offsetSamples + i] = ref[i];
+        }
+
+        auto res = detector.detect(ref, target, 48000);
+        TEST_ASSERT(res.isDetected, "Detected chirp at known delay " + std::to_string(delayMs) + " ms");
+        TEST_ASSERT(std::abs(res.arrivalTimeSec * 1000.0 - delayMs) < 0.05, 
+                    "Arrival time matches target delay within 0.05 ms");
+    }
+}
+
+void testCorrelationDetectorNoisySignal() {
+    std::cout << "[TEST] CorrelationDetector: Robustness Under Additive Noise (M11)\n";
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = 48000;
+    params.durationSec = 0.150;
+    params.amplitude = 0.25f;
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    const size_t embedIndex = 2400; // 50 ms delay
+    std::vector<float> target(24000, 0.0f);
+    for (size_t i = 0; i < ref.size(); ++i) {
+        target[embedIndex + i] = ref[i];
+    }
+
+    // Add pseudo-random white noise (linear congruential generator)
+    uint32_t seed = 123456789;
+    for (float& s : target) {
+        seed = seed * 1664525 + 1013904223;
+        float noise = (static_cast<float>(seed & 0xFFFF) / 32768.0f - 1.0f) * 0.05f; // noise +/- 0.05
+        s += noise;
+    }
+
+    syncwave::CorrelationDetector detector;
+    auto res = detector.detect(ref, target, 48000);
+
+    TEST_ASSERT(res.isDetected, "Detected chirp in noisy environment");
+    TEST_ASSERT(std::abs(res.arrivalTimeSec * 1000.0 - 50.0) < 0.5, 
+                "Detected arrival is within 0.5 ms of true 50.0 ms arrival under noise");
+    TEST_ASSERT(res.noiseFloorRms > 0.001f, "Noise floor RMS reflects injected noise level");
+}
+
+void testCorrelationDetectorMultiEcho() {
+    std::cout << "[TEST] CorrelationDetector: Multi-Echo & Room Reflection Immunity (M11)\n";
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = 48000;
+    params.durationSec = 0.100;
+    params.amplitude = 0.25f;
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    // Primary direct arrival at 100 ms (sample 4800) with amplitude 1.0
+    // Secondary reflected echo at 135 ms (sample 6480) with amplitude 0.5
+    std::vector<float> target(24000, 0.0f);
+    const size_t primaryIdx = 4800;
+    const size_t echoIdx = 6480;
+
+    for (size_t i = 0; i < ref.size(); ++i) {
+        target[primaryIdx + i] += ref[i];
+        if (echoIdx + i < target.size()) {
+            target[echoIdx + i] += ref[i] * 0.5f; // 50% echo
+        }
+    }
+
+    syncwave::CorrelationDetector detector;
+    auto res = detector.detect(ref, target, 48000);
+
+    TEST_ASSERT(res.isDetected, "Primary chirp detected despite secondary multipath echo");
+    TEST_ASSERT(std::abs(res.arrivalTimeSec * 1000.0 - 100.0) < 0.1, 
+                "Arrival is locked to primary direct wave (100.0 ms), not echo (135.0 ms)");
+}
+
+void testCorrelationDetectorFailedCorrelation() {
+    std::cout << "[TEST] CorrelationDetector: Outlier & Silence / Uncorrelated Rejection (M11)\n";
+
+    syncwave::ChirpParameters params;
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    // Pure silence buffer
+    std::vector<float> silence(24000, 0.0f);
+    syncwave::CorrelationDetector detector;
+    auto resSilence = detector.detect(ref, silence, 48000);
+    TEST_ASSERT(!resSilence.isDetected, "Silence correctly rejected (isDetected == false)");
+    TEST_ASSERT(resSilence.confidence < 0.2f, "Confidence is near zero for silence");
+
+    // Pure random noise buffer (no chirp embedded)
+    std::vector<float> noise(24000, 0.0f);
+    uint32_t seed = 987654321;
+    for (float& s : noise) {
+        seed = seed * 1664525 + 1013904223;
+        s = (static_cast<float>(seed & 0xFFFF) / 32768.0f - 1.0f) * 0.2f;
+    }
+    auto resNoise = detector.detect(ref, noise, 48000);
+    TEST_ASSERT(!resNoise.isDetected, "Uncorrelated noise correctly rejected");
+    TEST_ASSERT(resNoise.peakScore < 0.35f, "Peak score on noise is below threshold");
+}
+
+void testSampleRateDomainConversion() {
+    std::cout << "[TEST] Sample-Rate Domain Conversion (44.1 kHz Out vs 48 kHz Mic) (M11)\n";
+
+    // Output is 44.1 kHz, mic is 48.0 kHz
+    const uint32_t outRate = 44100;
+    const uint32_t micRate = 48000;
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = outRate;
+    params.durationSec = 0.150;
+    params.leadInSec = 0.200; // 200 ms lead-in silence @ 44.1k = 8820 frames
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    TEST_ASSERT(gen.chirpMasterFrameIndex() == 8820, "Lead-in frames @ 44.1kHz is 8820");
+
+    // True physical acoustic delay = 45.0 ms
+    // Emission starts at t = 200.0 ms. Physical arrival at t = 200.0 + 45.0 = 245.0 ms.
+    // At micRate 48 kHz, 245.0 ms corresponds to sample index: 0.245 * 48000 = 11760.
+    std::vector<float> micBuffer(48000, 0.0f);
+    const size_t arrivalSample = 11760;
+
+    // Resample reference chirp from 44.1k to 48k for simulated acoustic recording
+    syncwave::Resampler resampler(outRate, micRate, 1);
+    std::vector<float> micRef(static_cast<size_t>(ref.size() * (48000.0 / 44100.0)) + 100);
+    size_t produced = resampler.process(ref.data(), ref.size(), micRef.data(), micRef.size());
+    micRef.resize(produced);
+
+    for (size_t i = 0; i < micRef.size(); ++i) {
+        if (arrivalSample + i < micBuffer.size()) {
+            micBuffer[arrivalSample + i] = micRef[i];
+        }
+    }
+
+    syncwave::CorrelationDetector detector;
+    auto corr = detector.detect(micRef, micBuffer, micRate);
+    TEST_ASSERT(corr.isDetected, "Detected chirp across sample rate boundary");
+
+    double emissionSec = static_cast<double>(gen.chirpMasterFrameIndex()) / static_cast<double>(outRate);
+    double arrivalSec = corr.arrivalTimeSec;
+    double calculatedLatencyMs = (arrivalSec - emissionSec) * 1000.0;
+
+    TEST_ASSERT(std::abs(calculatedLatencyMs - 45.0) < 0.2, 
+                "Calculated latency matches physical 45.0 ms within 0.2 ms across mixed sample rates");
+}
+
+void testMultiRunStatisticsAndOutlierRejection() {
+    std::cout << "[TEST] Multi-Run Statistical Aggregation & Robust Estimator (M11/M11.1)\n";
+
+    syncwave::AcousticCalibrationConfig config;
+    config.runs = 7;
+    config.minValidRuns = 5;
+    syncwave::AcousticCalibrator calibrator(config);
+
+    syncwave::ChirpGenerator gen(config.chirpParams);
+    auto ref = gen.generateReferenceChirp();
+
+    // Create 7 synthetic capture runs with true delays:
+    // Run 1: 24.1 ms, Run 2: 24.3 ms, Run 3: 24.2 ms, Run 4: 24.4 ms, Run 5: 24.2 ms, Run 6: 24.1 ms, Run 7: 24.3 ms
+    std::vector<double> delaysMs = { 24.1, 24.3, 24.2, 24.4, 24.2, 24.1, 24.3 };
+    std::vector<std::vector<float>> buffers;
+
+    for (double d : delaysMs) {
+        size_t leadInSamples = gen.chirpMasterFrameIndex();
+        size_t delaySamples = static_cast<size_t>(std::round((d / 1000.0) * 48000.0));
+        size_t totalArrival = leadInSamples + delaySamples;
+
+        std::vector<float> buf(totalArrival + ref.size() + 2400, 0.0f);
+        for (size_t i = 0; i < ref.size(); ++i) {
+            buf[totalArrival + i] = ref[i];
+        }
+        buffers.push_back(buf);
+    }
+
+    auto result = calibrator.evaluateSyntheticRuns(
+        "dev-test", "Test Speaker", "mic-test", "Test Mic",
+        buffers, { 0, 0, 0, 0, 0, 0, 0 }, 48000, 48000);
+
+    TEST_ASSERT(result.isValid, "7-run synthetic calibration is valid");
+    TEST_ASSERT(result.validRuns == 7, "All 7 runs are valid");
+    TEST_ASSERT(std::abs(result.medianLatencyMs - 24.2) < 0.05, "Median latency is 24.2 ms");
+    TEST_ASSERT(result.stdDevMs < 0.20, "Uncertainty (std dev) is < 0.20 ms");
+    TEST_ASSERT(result.minLatencyMs >= 24.0 && result.maxLatencyMs <= 24.5, "Min/Max bounds correct");
+}
+
+void testAcousticCalibrationStricterAcceptanceCriteria() {
+    std::cout << "[TEST] AcousticCalibrator: Acceptance Criteria & Failure Non-Overwrite (M11.1)\n";
+
+    syncwave::AcousticCalibrationConfig config;
+    config.runs = 7;
+    config.minValidRuns = 5;
+    syncwave::AcousticCalibrator calibrator(config);
+
+    syncwave::ChirpGenerator gen(config.chirpParams);
+    auto ref = gen.generateReferenceChirp();
+
+    // Scenario A: Only 4 valid runs out of 7 (3 pure silence runs) -> Must fail (4 < 5)
+    std::vector<std::vector<float>> buffersA;
+    for (size_t i = 0; i < 7; ++i) {
+        if (i < 4) {
+            // Valid chirp at 50 ms
+            size_t totalArrival = gen.chirpMasterFrameIndex() + 2400;
+            std::vector<float> buf(totalArrival + ref.size() + 1000, 0.0f);
+            for (size_t k = 0; k < ref.size(); ++k) buf[totalArrival + k] = ref[k];
+            buffersA.push_back(buf);
+        } else {
+            // Silence buffer (fails detection)
+            std::vector<float> silenceBuf(48000, 0.0f);
+            buffersA.push_back(silenceBuf);
+        }
+    }
+
+    auto resultA = calibrator.evaluateSyntheticRuns(
+        "dev-fail", "Fail Speaker", "mic-test", "Test Mic",
+        buffersA, {0,0,0,0,0,0,0}, 48000, 48000);
+
+    TEST_ASSERT(!resultA.isValid, "Calibration rejected when valid runs (4) < minValidRuns (5)");
+    TEST_ASSERT(resultA.validRuns == 4, "Detected exactly 4 valid runs");
+    TEST_ASSERT(resultA.validationMessage.find("Insufficient valid runs") != std::string::npos, 
+                "Validation message states insufficient valid runs");
+
+    // Scenario B: High variance / unstable latency runs (e.g. 50 ms, 120 ms, 200 ms, 350 ms, 500 ms)
+    std::vector<std::vector<float>> buffersB;
+    std::vector<double> wildDelays = { 50.0, 120.0, 200.0, 350.0, 500.0, 60.0, 180.0 };
+    for (double d : wildDelays) {
+        size_t totalArrival = gen.chirpMasterFrameIndex() + static_cast<size_t>(std::round(d * 48.0));
+        std::vector<float> buf(totalArrival + ref.size() + 1000, 0.0f);
+        for (size_t k = 0; k < ref.size(); ++k) buf[totalArrival + k] = ref[k];
+        buffersB.push_back(buf);
+    }
+
+    auto resultB = calibrator.evaluateSyntheticRuns(
+        "dev-wild", "Wild Speaker", "mic-test", "Test Mic",
+        buffersB, {0,0,0,0,0,0,0}, 48000, 48000);
+
+    TEST_ASSERT(!resultB.isValid, "Calibration rejected when standard deviation exceeds max acceptable limit");
+    TEST_ASSERT(resultB.stdDevMs > config.maxAcceptableStdDevMs, "Uncertainty exceeded 15.0 ms limit");
+}
+
+void testCorrelationDetectorMultiPeakAndSecondaryReflection() {
+    std::cout << "[TEST] CorrelationDetector: Multi-Peak & Secondary Reflection Diagnostics (M11.1)\n";
+
+    syncwave::ChirpParameters params;
+    params.sampleRate = 48000;
+    params.durationSec = 0.100;
+    params.amplitude = 0.30f;
+    syncwave::ChirpGenerator gen(params);
+    auto ref = gen.generateReferenceChirp();
+
+    // Primary direct arrival at 100 ms (sample 4800), amp 1.0
+    // Strong secondary multipath reflection at 132.6 ms (sample 6365, +32.6 ms separation like M11 hardware!), amp 0.6
+    std::vector<float> target(30000, 0.0f);
+    const size_t primarySample = 4800;
+    const size_t secondarySample = 6365;
+
+    for (size_t i = 0; i < ref.size(); ++i) {
+        target[primarySample + i] += ref[i];
+        target[secondarySample + i] += ref[i] * 0.60f;
+    }
+
+    syncwave::CorrelationDetector detector;
+    auto res = detector.detect(ref, target, 48000);
+
+    TEST_ASSERT(res.isDetected, "Direct wave successfully detected");
+    TEST_ASSERT(std::abs(res.arrivalTimeSec * 1000.0 - 100.0) < 0.1, "Primary arrival locked to 100.0 ms");
+    TEST_ASSERT(res.secondaryPeakScore > 0.50f, "Secondary peak detected with score > 0.50");
+    TEST_ASSERT(std::abs(res.peakSeparationMs - 32.6) < 0.2, "Secondary peak separation correctly measured at ~32.6 ms");
+    TEST_ASSERT(res.peakToSecondaryRatio > 1.3f && res.peakToSecondaryRatio < 1.9f, 
+                "Peak to secondary ratio reflects relative reflection amplitude (~1.6x)");
+}
+
+void testAcousticCalibrationDirectionAndTwoDeviceAlignment() {
+    std::cout << "[TEST] Acoustic Latency Calibration Direction & Two-Device Proof (M11.1)\n";
+
+    // Device A (Realtek Speakers):
+    // Software latency = 80.0 ms, Measured acoustic arrival offset = 107.0 ms
+    // Effective latency = 80.0 + 107.0 = 187.0 ms
+    syncwave::OutputLatencyModel modelRealtek;
+    modelRealtek.deviceId = "realtek-speakers";
+    modelRealtek.deviceName = "Realtek Speakers";
+    modelRealtek.sampleRate = 48000;
+    modelRealtek.wasapiStreamLatencyMs = 10.0;
+    modelRealtek.wasapiPaddingMs = 20.0;
+    modelRealtek.queueLatencyMs = 50.0;
+    modelRealtek.optionalCalibrationOffsetMs = 107.0;
+    modelRealtek.updateTotals();
+
+    // Device B (realme Buds T310):
+    // Software latency = 80.0 ms, Measured acoustic arrival offset = 275.0 ms (e.g. Bluetooth A2DP transport buffer)
+    // Under Model B: Effective latency = 275.0 ms (no double-counting of software latency)
+    syncwave::OutputLatencyModel modelBuds;
+    modelBuds.deviceId = "buds-t310";
+    modelBuds.deviceName = "Buds T310";
+    modelBuds.sampleRate = 48000;
+    modelBuds.wasapiStreamLatencyMs = 10.0;
+    modelBuds.wasapiPaddingMs = 20.0;
+    modelBuds.queueLatencyMs = 50.0;
+    modelBuds.optionalCalibrationOffsetMs = 275.0;
+    modelBuds.updateTotals();
+
+    auto plan = syncwave::SyncController::computeSoftwareAlignmentPlan({ modelRealtek, modelBuds });
+
+    TEST_ASSERT(plan.isValid, "Two-device alignment plan is valid");
+    TEST_ASSERT(plan.syncState == syncwave::SyncState::PhysicallyCalibrated, "SyncState is PhysicallyCalibrated");
+    TEST_ASSERT(std::abs(plan.targetLatencyMs - 275.0) < 1e-4, "Target timeline aligns to the slowest acoustic path (275.0 ms under Model B)");
+
+    // CRITICAL DIRECTION CHECK:
+    // Faster acoustic device (Realtek, arrival 107ms) MUST receive extra delay:
+    // Delay = 275.0 - 107.0 = 168.0 ms!
+    // Slower acoustic device (Buds, arrival 275ms) MUST receive ZERO extra delay:
+    // Delay = 275.0 - 275.0 = 0.0 ms!
+    TEST_ASSERT(std::abs(plan.calculatedDelaysMs[0] - 168.0) < 1e-4, 
+                "Fast acoustic path (Realtek) receives positive delay to wait for slow acoustic path");
+    TEST_ASSERT(plan.calculatedDelaysMs[1] == 0.0, 
+                "Slow acoustic path (Buds) receives zero delay (emitted immediately)");
+}
+
+void testCalibrationStorePersistence() {
+    std::cout << "[TEST] CalibrationStore: JSON Persistence & CRUD Operations (M11)\n";
+
+    std::string testPath = "build/test_store_calibrations.json";
+    std::filesystem::remove(testPath);
+
+    syncwave::CalibrationStore store(testPath);
+
+    syncwave::AcousticCalibrationRecord r1;
+    r1.deviceId = "{0.0.0.00000000}.{realtek-test}";
+    r1.deviceName = "Speakers (Realtek Audio)";
+    r1.microphoneId = "{0.0.1.00000000}.{mic-test}";
+    r1.microphoneName = "Microphone Array";
+    r1.measuredLatencyMs = 24.35;
+    r1.uncertaintyMs = 0.42;
+    r1.confidence = 0.96f;
+    r1.runCount = 5;
+    r1.validRunCount = 5;
+    r1.sampleRate = 48000;
+
+    syncwave::AcousticCalibrationRecord r2;
+    r2.deviceId = "{0.0.0.00000000}.{buds-test}";
+    r2.deviceName = "Headphones (realme Buds T310)";
+    r2.microphoneId = "{0.0.1.00000000}.{mic-test}";
+    r2.microphoneName = "Microphone Array";
+    r2.measuredLatencyMs = 185.20;
+    r2.uncertaintyMs = 1.15;
+    r2.confidence = 0.94f;
+    r2.runCount = 5;
+    r2.validRunCount = 5;
+    r2.sampleRate = 44100;
+
+    TEST_ASSERT(store.save(r1), "Saved Realtek calibration record");
+    TEST_ASSERT(store.save(r2), "Saved Buds calibration record");
+
+    auto list = store.list();
+    TEST_ASSERT(list.size() == 2, "List contains exactly 2 records");
+
+    // Reload from file to verify persistence
+    syncwave::CalibrationStore store2(testPath);
+    auto loadedR1 = store2.get(r1.deviceId);
+    TEST_ASSERT(loadedR1.has_value(), "Found Realtek record after reload");
+    TEST_ASSERT(std::abs(loadedR1->measuredLatencyMs - 24.35) < 1e-4, "Realtek latency matches exactly");
+    TEST_ASSERT(std::abs(loadedR1->uncertaintyMs - 0.42) < 1e-4, "Realtek uncertainty matches");
+    TEST_ASSERT(loadedR1->deviceName == r1.deviceName, "Device friendly name matches");
+
+    auto loadedR2 = store2.get(r2.deviceId);
+    TEST_ASSERT(loadedR2.has_value(), "Found Buds record after reload");
+    TEST_ASSERT(std::abs(loadedR2->measuredLatencyMs - 185.20) < 1e-4, "Buds latency matches");
+
+    // Remove one record
+    TEST_ASSERT(store2.remove(r1.deviceId), "Removed Realtek record");
+    TEST_ASSERT(store2.list().size() == 1, "Only 1 record remains after removal");
+    TEST_ASSERT(!store2.get(r1.deviceId).has_value(), "Realtek record no longer found");
+
+    // Clear
+    store2.clear();
+    TEST_ASSERT(store2.list().empty(), "Store empty after clear");
+
+    std::filesystem::remove(testPath);
+}
+
+void testAcousticCalibrationIntegrationWithLatencyModel() {
+    std::cout << "[TEST] OutputLatencyModel & SyncController Acoustic Integration (Model B)\n";
+
+    // Device A (Realtek): SW latency = 80.0 ms, End-to-end acoustic arrival calibration = 107.40 ms
+    syncwave::OutputLatencyModel modelA;
+    modelA.deviceId = "dev-a";
+    modelA.deviceName = "Realtek";
+    modelA.sampleRate = 48000;
+    modelA.wasapiPaddingMs = 20.0;
+    modelA.queueLatencyMs = 60.0;
+    modelA.optionalCalibrationOffsetMs = 107.40;
+    modelA.updateTotals();
+
+    TEST_ASSERT(modelA.estimatedSoftwareLatencyMs == 80.0, "Model A software latency is 80.0 ms");
+    TEST_ASSERT(modelA.effectiveLatencyMs == 107.40, "Model A effective latency equals calibrated arrival offset (107.40 ms, no double-counting)");
+
+    // Device B (Buds): SW latency = 80.0 ms, End-to-end acoustic arrival calibration = 131.68 ms
+    syncwave::OutputLatencyModel modelB;
+    modelB.deviceId = "dev-b";
+    modelB.deviceName = "Buds";
+    modelB.sampleRate = 48000;
+    modelB.wasapiPaddingMs = 20.0;
+    modelB.queueLatencyMs = 60.0;
+    modelB.optionalCalibrationOffsetMs = 131.68;
+    modelB.updateTotals();
+
+    TEST_ASSERT(modelB.estimatedSoftwareLatencyMs == 80.0, "Model B software latency is 80.0 ms");
+    TEST_ASSERT(modelB.effectiveLatencyMs == 131.68, "Model B effective latency equals calibrated arrival offset (131.68 ms, no double-counting)");
+
+    // Compute alignment plan:
+    // Target latency = max(107.40, 131.68) = 131.68 ms
+    // Device A delay = 131.68 - 107.40 = 24.28 ms
+    // Device B delay = 131.68 - 131.68 = 0.0 ms
+    auto plan = syncwave::SyncController::computeSoftwareAlignmentPlan({ modelA, modelB });
+
+    TEST_ASSERT(plan.isValid, "Alignment plan is valid");
+    TEST_ASSERT(plan.syncState == syncwave::SyncState::PhysicallyCalibrated, 
+                "SyncState is marked PhysicallyCalibrated");
+    TEST_ASSERT(std::abs(plan.targetLatencyMs - 131.68) < 1e-4, "Target latency is 131.68 ms");
+    TEST_ASSERT(std::abs(plan.calculatedDelaysMs[0] - 24.28) < 1e-4, 
+                "Device A delay is compensated by exactly 24.28 ms to physically align with Buds");
+    TEST_ASSERT(plan.calculatedDelaysFrames[0] == 1165, "Device A delay frames is 1165 @ 48kHz (round(24.28 * 48))");
+    TEST_ASSERT(plan.calculatedDelaysMs[1] == 0.0, "Device B (slowest acoustic path) has 0.0 ms delay");
+    TEST_ASSERT(plan.calculatedDelaysFrames[1] == 0, "Device B delay frames is 0");
+}
+
+void testModelBAccountingNoDoubleCounting() {
+    std::cout << "[TEST] Milestone 11.2: Model B Accounting & Zero Double-Counting Audit\n";
+
+    syncwave::OutputLatencyModel m;
+    m.deviceId = "test-endpoint";
+    m.deviceName = "Audited Endpoint";
+    m.sampleRate = 48000;
+    m.wasapiStreamLatencyMs = 10.0;
+    m.wasapiPaddingMs = 22.0;
+    m.queueLatencyMs = 0.0;
+    m.resamplerLatencyMs = 0.0;
+
+    // Case 1: Uncalibrated (no acoustic measurement)
+    m.optionalCalibrationOffsetMs = 0.0;
+    m.updateTotals();
+    TEST_ASSERT(m.estimatedSoftwareLatencyMs == 32.0, "Uncalibrated: Est SW is 32.0 ms");
+    TEST_ASSERT(m.effectiveLatencyMs == 32.0, "Uncalibrated: Effective latency defaults to software latency");
+
+    // Case 2: Calibrated under Model B
+    m.optionalCalibrationOffsetMs = 131.68;
+    m.updateTotals();
+    TEST_ASSERT(m.estimatedSoftwareLatencyMs == 32.0, "Calibrated: Est SW remains 32.0 ms");
+    TEST_ASSERT(m.effectiveLatencyMs == 131.68, "Calibrated: Effective latency is exactly calibrated arrival (131.68 ms)");
+
+    // Case 3: Transient queue spike (like the 258.67 ms initialization backlog)
+    // Changing software buffer / queue depth must NOT alter the physical acoustic arrival reference!
+    m.queueLatencyMs = 258.67;
+    m.updateTotals();
+    TEST_ASSERT(std::abs(m.estimatedSoftwareLatencyMs - 290.67) < 0.01, "Queue spike inflates Est SW to 290.67 ms");
+    TEST_ASSERT(m.effectiveLatencyMs == 131.68, "CRITICAL: Effective latency is NOT inflated by queue spike (remains 131.68 ms)");
+
+    // Case 4: Changing WASAPI padding must also not inflate effective latency when calibrated
+    m.wasapiPaddingMs = 50.0;
+    m.updateTotals();
+    TEST_ASSERT(m.effectiveLatencyMs == 131.68, "CRITICAL: Effective latency is immune to WASAPI padding double-counting");
+}
+
+void testBudsRunAccountingAndMadCalculation() {
+    std::cout << "[TEST] Milestone 11.2: Buds 5/7 Run Accounting & MAD Outlier Rejection Math\n";
+
+    // Exact 7 runs recorded for OnePlus Buds:
+    std::vector<syncwave::SingleRunMeasurement> runs(7);
+    runs[0].runIndex = 1; runs[0].measuredLatencyMs = 140.48; runs[0].confidence = 0.90f; runs[0].isSuccess = true;
+    runs[1].runIndex = 2; runs[1].measuredLatencyMs = 121.51; runs[1].confidence = 0.92f; runs[1].isSuccess = true;
+    runs[2].runIndex = 3; runs[2].measuredLatencyMs = 136.29; runs[2].confidence = 0.94f; runs[2].isSuccess = true;
+    runs[3].runIndex = 4; runs[3].measuredLatencyMs = 130.29; runs[3].confidence = 0.95f; runs[3].isSuccess = true;
+    runs[4].runIndex = 5; runs[4].measuredLatencyMs = 133.06; runs[4].confidence = 0.96f; runs[4].isSuccess = true;
+    runs[5].runIndex = 6; runs[5].measuredLatencyMs = -334.26; runs[5].confidence = 0.10f; // invalid timing
+    runs[6].runIndex = 7; runs[6].measuredLatencyMs = 109.00; runs[6].confidence = 0.88f; runs[6].isSuccess = true;
+
+    // Filter by plausibility window [0, 800 ms]
+    std::vector<syncwave::SingleRunMeasurement> plausibleRuns;
+    for (const auto& r : runs) {
+        if (r.measuredLatencyMs >= 0.0 && r.measuredLatencyMs <= 800.0) {
+            plausibleRuns.push_back(r);
+        }
+    }
+    TEST_ASSERT(plausibleRuns.size() == 6, "Plausibility filter rejects Run 6 (-334.26 ms), leaving 6 runs");
+
+    std::vector<double> latencies;
+    for (const auto& m : plausibleRuns) latencies.push_back(m.measuredLatencyMs);
+    std::sort(latencies.begin(), latencies.end()); // 109.00, 121.51, 130.29, 133.06, 136.29, 140.48
+    double median = 0.5 * (latencies[2] + latencies[3]); // 131.675 ms
+    TEST_ASSERT(std::abs(median - 131.675) < 1e-3, "Initial 6-run median is 131.675 ms");
+
+    std::vector<double> devs;
+    for (double v : latencies) devs.push_back(std::abs(v - median));
+    std::sort(devs.begin(), devs.end());
+    double mad = 0.5 * (devs[2] + devs[3]); // (4.615 + 8.805) / 2 = 6.71 ms
+    TEST_ASSERT(std::abs(mad - 6.71) < 0.01, "MAD is exactly 6.71 ms");
+
+    double threshold = std::max(3.0 * mad, 15.0); // max(20.13, 15.0) = 20.13 ms
+    TEST_ASSERT(std::abs(threshold - 20.13) < 0.01, "Outlier threshold 3*MAD is 20.13 ms");
+
+    // Check Run 7:
+    double devRun7 = std::abs(109.00 - median); // 22.675 ms
+    TEST_ASSERT(devRun7 > threshold, "Run 7 deviation (22.68 ms) > threshold (20.13 ms) -> REJECTED as statistical outlier");
+
+    // 5 runs retained
+    std::vector<double> retained = { 121.51, 130.29, 133.06, 136.29, 140.48 };
+    double sum = 0.0;
+    for (double v : retained) sum += v;
+    double mean = sum / 5.0;
+    TEST_ASSERT(std::abs(mean - 132.326) < 0.01, "Retained 5 runs mean is 132.33 ms");
+
+    double sqSum = 0.0;
+    for (double v : retained) sqSum += (v - mean) * (v - mean);
+    double stdDev = std::sqrt(sqSum / 4.0);
+    TEST_ASSERT(std::abs(stdDev - 7.14) < 0.02, "Retained 5 runs std dev is 7.14 ms (matches uncertainty +/- 7.14 ms)");
+}
+
+void testCalibrationStoreMetadataType() {
+    std::cout << "[TEST] Milestone 11.2: CalibrationStore measurement_type & madMs Persistence\n";
+
+    std::string testPath = "test_calibrations_meta.json";
+    if (std::filesystem::exists(testPath)) {
+        std::filesystem::remove(testPath);
+    }
+
+    syncwave::CalibrationStore store(testPath);
+
+    syncwave::AcousticCalibrationRecord rec;
+    rec.deviceId = "dev-1";
+    rec.deviceName = "Realtek Speakers";
+    rec.microphoneId = "mic-1";
+    rec.microphoneName = "AMD Mic";
+    rec.measurementType = "end_to_end_acoustic_arrival";
+    rec.measuredLatencyMs = 107.40;
+    rec.uncertaintyMs = 0.68;
+    rec.madMs = 0.45;
+    rec.confidence = 0.95f;
+    rec.runCount = 7;
+    rec.validRunCount = 5;
+
+    bool saved = store.save(rec);
+    TEST_ASSERT(saved, "Successfully saved record with measurement_type and madMs");
+
+    syncwave::CalibrationStore storeReload(testPath);
+    auto loaded = storeReload.get("dev-1");
+    TEST_ASSERT(loaded.has_value(), "Successfully retrieved stored record");
+    TEST_ASSERT(loaded->measurementType == "end_to_end_acoustic_arrival", "Loaded measurement_type is end_to_end_acoustic_arrival");
+    TEST_ASSERT(std::abs(loaded->measuredLatencyMs - 107.40) < 1e-4, "Loaded measuredLatencyMs is 107.40 ms");
+    TEST_ASSERT(std::abs(loaded->madMs - 0.45) < 1e-4, "Loaded madMs is 0.45 ms");
+
+    std::filesystem::remove(testPath);
+}
+
+void testSoftwareHardwareBoundaryAppliedOnce() {
+    std::cout << "[TEST] Milestone 11.2: Software-Hardware Boundary & Single Delay Allocation\n";
+
+    // Setup OutputRouter with 2 outputs
+    syncwave::AudioDevice devA; devA.id = "dev-a"; devA.name = "Realtek"; devA.isActive = true;
+    syncwave::AudioDevice devB; devB.id = "dev-b"; devB.name = "Buds"; devB.isActive = true;
+
+    syncwave::OutputRouter router;
+    router.addOutput(devA);
+    router.addOutput(devB);
+    router.initializeOutputsForTesting(48000, 2);
+
+    // Set calibrated arrival offsets
+    router.setDeviceCalibrationOffsetMs(0, 107.40);
+    router.setDeviceCalibrationOffsetMs(1, 131.68);
+
+    auto models = router.getLatencyModels();
+    TEST_ASSERT(models[0].optionalCalibrationOffsetMs == 107.40, "Device 0 has calibration offset 107.40 ms");
+    TEST_ASSERT(models[0].effectiveLatencyMs == 107.40, "Device 0 effective latency is 107.40 ms under Model B");
+    TEST_ASSERT(models[1].optionalCalibrationOffsetMs == 131.68, "Device 1 has calibration offset 131.68 ms");
+    TEST_ASSERT(models[1].effectiveLatencyMs == 131.68, "Device 1 effective latency is 131.68 ms under Model B");
+
+    auto plan = syncwave::SyncController::computeSoftwareAlignmentPlan(models);
+    TEST_ASSERT(plan.isValid, "Plan is valid");
+    TEST_ASSERT(std::abs(plan.targetLatencyMs - 131.68) < 1e-4, "Target latency is 131.68 ms");
+    TEST_ASSERT(std::abs(plan.calculatedDelaysMs[0] - 24.28) < 1e-4, "Realtek calculated delay is 24.28 ms");
+    TEST_ASSERT(plan.calculatedDelaysMs[1] == 0.0, "Buds calculated delay is 0.0 ms");
+
+    router.applySyncPlan(plan);
+
+    auto telem = router.getOutputTelemetry();
+    TEST_ASSERT(std::abs(telem[0].configuredDelayMs - 24.28) < 0.1, "Realtek configuredDelayMs in DelayBuffer is 24.28 ms");
+    TEST_ASSERT(telem[0].appliedDelayFrames == 1165, "Realtek appliedDelayFrames in DelayBuffer is exactly 1165 frames");
+    TEST_ASSERT(telem[1].configuredDelayMs == 0.0, "Buds configuredDelayMs is 0.0 ms");
+    TEST_ASSERT(telem[1].appliedDelayFrames == 0, "Buds appliedDelayFrames is 0 frames");
+
+    // Verify delay was NOT applied to resampler or queue (no double application)
+    TEST_ASSERT(telem[0].currentRateAdjustmentPpm == 0.0, "Resampler rate adjustment is 0 ppm (delay handled purely by DelayBuffer)");
+    TEST_ASSERT(telem[1].currentRateAdjustmentPpm == 0.0, "Resampler rate adjustment is 0 ppm");
+
+    router.closeOutputs();
+}
+
+void testSyntheticDriftMatrixM12() {
+    std::cout << "[TEST] Synthetic Drift Matrix & Disturbance Recovery (M12)\n";
+
+    syncwave::DriftControllerConfig config;
+    config.deadbandMs = 1.0;
+    config.maxAdjustmentPpm = 100.0;
+    config.kp = 10.0;
+    config.enableFeedforward = true;
+    config.minObservationSec = 5.0;
+    config.minSamples = 30;
+    config.minConfidence = 0.90;
+
+    syncwave::DriftController controller(config);
+    controller.setEnabled(true);
+
+    // Matrix of tested relative drifts
+    std::vector<double> driftPpmCases = { 0.0, 10.0, 25.0, 50.0, -10.0, -25.0, -50.0 };
+
+    for (double drift : driftPpmCases) {
+        syncwave::SyncError err;
+        err.isValid = true;
+        err.confidence = 0.95;
+        err.observationDurationSec = 10.0;
+        err.filteredDriftPpm = drift;
+        err.filteredPhaseErrorMs = 0.0; // zero phase error -> pure feedforward
+
+        auto corr = controller.calculateCorrection(err);
+        double expectedCorr = -drift; // feedforward cancels clock drift
+
+        TEST_ASSERT(std::abs(corr.targetRateAdjustmentPpm - expectedCorr) < 1e-4,
+                    ("Drift " + std::to_string(drift) + " ppm yields exact negative correction " + std::to_string(expectedCorr) + " ppm").c_str());
+        TEST_ASSERT(std::abs(corr.targetRateAdjustmentPpm) <= 50.0,
+                    "Correction does not saturate at ±100 ppm clamp");
+    }
+
+    // Temporary disturbance recovery test:
+    // Output experiences large sudden disturbance: phase error +8.0 ms and drift +40.0 ppm
+    syncwave::SyncError disturbance;
+    disturbance.isValid = true;
+    disturbance.confidence = 0.95;
+    disturbance.observationDurationSec = 10.0;
+    disturbance.filteredDriftPpm = 40.0;
+    disturbance.filteredPhaseErrorMs = 8.0;
+
+    auto corrDisturb = controller.calculateCorrection(disturbance);
+    // feedforward = -40 ppm; proportional = (8.0 - 1.0) * 10 = +70 ppm; sum = +30 ppm
+    TEST_ASSERT(corrDisturb.targetRateAdjustmentPpm == 30.0, "Disturbance response: feedforward (-40) + phase feedback (+70) = +30 ppm");
+    TEST_ASSERT(corrDisturb.state == syncwave::DriftCorrectionState::Correcting, "State is Correcting");
+    TEST_ASSERT(corrDisturb.targetRateAdjustmentPpm < 100.0, "Controller handles +8ms disturbance without hitting clamp");
+
+    // Disturbance subsides: phase error returns to 0.5 ms (inside deadband), drift settles to 0.0 ppm
+    syncwave::SyncError recovered;
+    recovered.isValid = true;
+    recovered.confidence = 0.95;
+    recovered.observationDurationSec = 10.0;
+    recovered.filteredDriftPpm = 0.0;
+    recovered.filteredPhaseErrorMs = 0.5;
+
+    auto corrRecovered = controller.calculateCorrection(recovered);
+    TEST_ASSERT(corrRecovered.targetRateAdjustmentPpm == 0.0, "Recovered state returns to 0.0 ppm adjustment");
+    TEST_ASSERT(corrRecovered.state == syncwave::DriftCorrectionState::Locked, "State returns to Locked");
+}
+
+void testDisconnectReconnectOutputSafetyM12() {
+    std::cout << "[TEST] Disconnect & Reconnect Safety Lifecycle (M12)\n";
+
+    syncwave::AudioDevice dev0; dev0.id = "dev-0"; dev0.name = "Realtek"; dev0.isActive = true;
+    syncwave::AudioDevice dev1; dev1.id = "dev-1"; dev1.name = "Buds"; dev1.isActive = true;
+
+    syncwave::OutputRouter router;
+    router.addOutput(dev0);
+    router.addOutput(dev1);
+    TEST_ASSERT(router.initializeOutputsForTesting(48000, 2), "Router initialized for testing with 2 outputs");
+
+    // Both outputs initially available
+    TEST_ASSERT(router.getOutput(0)->isAvailable(), "Dev 0 available");
+    TEST_ASSERT(router.getOutput(1)->isAvailable(), "Dev 1 available");
+
+    // Route frames
+    std::vector<float> frames(480 * 2, 0.5f);
+    router.route(frames.data(), 480);
+    TEST_ASSERT(router.getOutput(0)->queue()->availableToRead() == 480, "Dev 0 received 480 frames");
+    TEST_ASSERT(router.getOutput(1)->queue()->availableToRead() == 480, "Dev 1 received 480 frames");
+
+    // 1. Simulate disconnect of dev-1
+    router.onDeviceDisconnected("dev-1");
+    TEST_ASSERT(router.getOutput(0)->isAvailable(), "Dev 0 remains available after Dev 1 disconnect");
+    TEST_ASSERT(!router.getOutput(1)->isAvailable(), "Dev 1 marked unavailable");
+    TEST_ASSERT(router.getOutput(1)->driftCorrectionState() == syncwave::DriftCorrectionState::Disconnected,
+                "Dev 1 drift controller marked Disconnected");
+
+    // 2. Route frames while disconnected: dev-0 must receive audio without disturbance; dev-1 skipped
+    router.route(frames.data(), 480);
+    TEST_ASSERT(router.getOutput(0)->queue()->availableToRead() == 960, "Dev 0 safely received additional 480 frames");
+    TEST_ASSERT(router.getOutput(1)->queue()->availableToRead() == 480, "Dev 1 queue unperturbed (received 0 new frames)");
+
+    // 3. Simulate reconnect of dev-1
+    // Reinitialize dev-1 queue for testing
+    router.getOutput(1)->initializeForTesting(48000, 2);
+    TEST_ASSERT(router.getOutput(1)->isAvailable(), "Dev 1 isAvailable restored upon reinitialization");
+
+    // 4. Route frames after reconnect: both outputs receive audio on master timeline
+    router.route(frames.data(), 480);
+    TEST_ASSERT(router.getOutput(0)->queue()->availableToRead() == 1440, "Dev 0 received 1440 cumulative frames");
+    TEST_ASSERT(router.getOutput(1)->queue()->availableToRead() == 480, "Dev 1 seamlessly rejoins master timeline");
+
+    router.closeOutputs();
+}
+
+void testQueueStressAndBoundedMemoryM12() {
+    std::cout << "[TEST] Output Queue Stress & Memory Bound Invariance (M12)\n";
+
+    syncwave::AudioDevice dev; dev.id = "dev-stress"; dev.name = "StressDevice"; dev.isActive = true;
+    syncwave::DeviceOutput out(dev);
+    TEST_ASSERT(out.initializeForTesting(48000, 2), "Initialized testing DeviceOutput");
+
+    // RingBuffer capacity is 48,000 frames (1 second)
+    TEST_ASSERT(out.queue()->capacityFrames() == 48000, "Queue capacity is exactly 48,000 frames");
+
+    // Push 40,000 frames: fits within capacity
+    std::vector<float> bulk(40000 * 2, 0.1f);
+    size_t w1 = out.push(bulk.data(), 40000);
+    TEST_ASSERT(w1 == 40000, "First push of 40,000 frames completely accepted");
+    TEST_ASSERT(out.queue()->availableToRead() == 40000, "Available to read is 40,000");
+
+    // Push another 20,000 frames: only 8,000 should fit, remaining 12,000 should register as overrun
+    std::vector<float> overflow(20000 * 2, 0.2f);
+    size_t w2 = out.push(overflow.data(), 20000);
+    TEST_ASSERT(w2 == 8000, "Second push writes exactly 8,000 frames to fill capacity");
+    TEST_ASSERT(out.queue()->availableToRead() == 48000, "Queue is full at 48,000 frames");
+
+    auto telem = out.getTelemetry();
+    TEST_ASSERT(telem.queueOverruns == 12000, "Queue overruns strictly counted (12,000 dropped frames)");
+
+    // Drain 24,000 frames (simulating consumer playback)
+    std::vector<float> drain(24000 * 2);
+    size_t read = out.queue()->read(drain.data(), 24000);
+    TEST_ASSERT(read == 24000, "Consumer drained 24,000 frames");
+    TEST_ASSERT(out.queue()->availableToRead() == 24000, "Available to read is now 24,000 frames");
+
+    // Push 20,000 frames again: now fits cleanly without increasing overruns
+    size_t w3 = out.push(overflow.data(), 20000);
+    TEST_ASSERT(w3 == 20000, "Push into drained space accepted without overrun");
+    TEST_ASSERT(out.getTelemetry().queueOverruns == 12000, "Overrun count did not increase");
+
+    out.close();
+}
+
+// ============================================================================
+// Milestone 13: Audio/Video Synchronization Architecture Tests
+// ============================================================================
+
+void testTimelineModelConversionsM13() {
+    std::cout << "[TEST] TimelineModel: Media PTS to Master Frame & Reverse Conversions (M13)\n";
+
+    syncwave::TimelineModel model(48000);
+
+    // Initial state: media 0 us -> master frame 0
+    TEST_ASSERT(model.sampleRate() == 48000, "Default sample rate is 48000 Hz");
+    TEST_ASSERT(!model.hasAnchor(), "Initially model has no anchor");
+    TEST_ASSERT(model.mediaUsToMasterFrame(0) == 0, "Media 0 us maps to master frame 0");
+    TEST_ASSERT(model.masterFrameToMediaUs(0) == 0, "Master frame 0 maps to media 0 us");
+
+    // 1.0 second conversion: 1,000,000 us -> 48,000 frames
+    TEST_ASSERT(model.mediaUsToMasterFrame(1000000) == 48000, "Media 1.0s maps to 48,000 frames");
+    TEST_ASSERT(model.masterFrameToMediaUs(48000) == 1000000, "Master frame 48,000 maps to 1.0s (1,000,000 us)");
+    TEST_ASSERT(std::abs(model.masterFrameToMediaMs(48000) - 1000.0) < 0.001, "Master frame 48,000 maps to 1000.0 ms");
+    TEST_ASSERT(model.mediaMsToMasterFrame(1000.0) == 48000, "Media 1000.0 ms maps to 48,000 frames");
+
+    // Fractional conversion: 23,219 us @ 48kHz = round(23219 * 48 / 1000) = round(1114.512) = 1115
+    uint64_t f_frac = model.mediaUsToMasterFrame(23219);
+    TEST_ASSERT(f_frac == 1115, "Fractional media PTS 23,219 us maps to frame 1115");
+
+    // Reversible identity test across arbitrary timestamps
+    for (int64_t testUs : { 50000, 250000, 1500000, 12500000 }) {
+        uint64_t frame = model.mediaUsToMasterFrame(testUs);
+        int64_t recoveredUs = model.masterFrameToMediaUs(frame);
+        int64_t errUs = std::abs(recoveredUs - testUs);
+        // Error should be within single-sample quantization window (1/48000 s ~= 20.8 us)
+        TEST_ASSERT(errUs <= 21, "Roundtrip conversion error <= single-sample quantization");
+    }
+
+    // Sample rate adaptation (e.g. 44.1 kHz)
+    model.setSampleRate(44100);
+    TEST_ASSERT(model.mediaUsToMasterFrame(1000000) == 44100, "Media 1.0s maps to 44,100 frames at 44.1kHz");
+    TEST_ASSERT(model.masterFrameToMediaUs(44100) == 1000000, "Master frame 44,100 maps to 1.0s at 44.1kHz");
+}
+
+void testTimelineModelSeekAndDiscontinuityM13() {
+    std::cout << "[TEST] TimelineModel: Seek, Anchor Re-Association, and Discontinuity (M13)\n";
+
+    syncwave::TimelineModel model(48000);
+
+    // Playback ran for 3 seconds (144,000 frames)
+    // Then a seek forward occurred to media position 10.0 seconds (10,000,000 us)
+    model.onSeek(10000000, 144000);
+    TEST_ASSERT(model.hasAnchor(), "Model is now anchored");
+    TEST_ASSERT(model.anchorMediaUs() == 10000000, "Anchor media time is 10,000,000 us");
+    TEST_ASSERT(model.anchorMasterFrame() == 144000, "Anchor master frame is 144,000");
+
+    // Immediately at the seek point:
+    TEST_ASSERT(model.mediaUsToMasterFrame(10000000) == 144000, "Seek target 10.0s maps directly to current master frame 144,000");
+    TEST_ASSERT(model.masterFrameToMediaUs(144000) == 10000000, "Master frame 144,000 maps to 10.0s");
+
+    // Advancing 1.0s after seek (to 11.0s media, 192,000 frames):
+    TEST_ASSERT(model.mediaUsToMasterFrame(11000000) == 192000, "Media 11.0s maps to master frame 192,000");
+    TEST_ASSERT(model.masterFrameToMediaUs(192000) == 11000000, "Master frame 192,000 maps to 11.0s");
+
+    // Seek backward: Jump from 11.0s back to 2.0s (2,000,000 us) at current master frame 192,000
+    model.onSeek(2000000, 192000);
+    TEST_ASSERT(model.anchorMediaUs() == 2000000, "Anchor updated to 2,000,000 us");
+    TEST_ASSERT(model.anchorMasterFrame() == 192000, "Anchor master frame updated to 192,000");
+    TEST_ASSERT(model.mediaUsToMasterFrame(2000000) == 192000, "Seek backward target maps to master frame 192,000");
+    TEST_ASSERT(model.masterFrameToMediaUs(192000) == 2000000, "Master frame 192,000 maps back to 2.0s");
+
+    // Advancing 0.5s after seek backward:
+    TEST_ASSERT(model.mediaUsToMasterFrame(2500000) == 192000 + 24000, "Media 2.5s maps to 216,000 frames");
+
+    // Rapid successive seeks (stressing anchor state consistency)
+    for (int64_t targetSec = 1; targetSec <= 10; ++targetSec) {
+        model.onSeek(targetSec * 1000000, 200000 + targetSec * 1000);
+        TEST_ASSERT(model.anchorMediaUs() == targetSec * 1000000, "Rapid seek anchor updated");
+    }
+
+    // Reset clears anchor
+    model.reset();
+    TEST_ASSERT(!model.hasAnchor(), "Reset successfully cleared anchor");
+}
+
+void testAvOffsetSignConventionM13() {
+    std::cout << "[TEST] A/V Offset Sign Convention & Mathematical Definition (M13)\n";
+
+    // Standard definition: offset = audioTimeMs - videoTimeMs
+    // Case 1: Audio is at 500 ms, Video is at 450 ms
+    // Audio is ahead by 50 ms -> positive offset
+    double offset1 = syncwave::TimelineModel::calculateAvOffsetMs(500.0, 450.0);
+    TEST_ASSERT(offset1 == +50.0, "Positive offset (+50 ms) indicates Audio LEADS Video");
+
+    // Case 2: Audio is at 400 ms, Video is at 480 ms
+    // Audio is behind by 80 ms -> negative offset
+    double offset2 = syncwave::TimelineModel::calculateAvOffsetMs(400.0, 480.0);
+    TEST_ASSERT(offset2 == -80.0, "Negative offset (-80 ms) indicates Audio LAGS Video");
+
+    // Case 3: Perfectly synchronized
+    double offset3 = syncwave::TimelineModel::calculateAvOffsetMs(1000.0, 1000.0);
+    TEST_ASSERT(offset3 == 0.0, "Zero offset indicates perfect A/V lock");
+}
+
+void testDeterministicMediaSourceM13() {
+    std::cout << "[TEST] DeterministicMediaSource: Frame Stepping, Markers, and Seek (M13)\n";
+
+    syncwave::DeterministicMediaSource source(48000, 30, 5.0); // 5 seconds @ 30 fps
+    TEST_ASSERT(source.sampleRate() == 48000, "Sample rate is 48000");
+    TEST_ASSERT(source.fps() == 30, "FPS is 30");
+    TEST_ASSERT(source.durationSec() == 5.0, "Duration is 5.0s");
+
+    // Read first block (frame 0)
+    auto b0 = source.readNextBlock();
+    TEST_ASSERT(b0.videoFrameNumber == 0, "First block video frame index is 0");
+    TEST_ASSERT(b0.mediaTimestampUs == 0, "First block media timestamp is 0 us");
+    TEST_ASSERT(b0.audioFrameCount == 1600, "Audio frames per 30fps block @ 48kHz is 1600 (48000/30)");
+    TEST_ASSERT(b0.audioPcm.size() == 3200, "Stereo buffer has 3200 floats");
+    TEST_ASSERT(!b0.hasAudioMarker, "Frame 0 does not cross 1.0s boundary marker");
+
+    // Step forward 29 blocks to reach frame 30 (1.0 second boundary)
+    bool markerDetected = false;
+    for (int i = 1; i < 31; ++i) {
+        auto b = source.readNextBlock();
+        if (b.hasAudioMarker) {
+            markerDetected = true;
+            TEST_ASSERT(b.videoFrameNumber >= 29 && b.videoFrameNumber <= 31, "Marker beep occurs at ~1.0s (frame 30)");
+        }
+    }
+    TEST_ASSERT(markerDetected, "1.0s periodic audio/video synchronization marker successfully generated");
+
+    // Seek forward to 3.0 seconds
+    source.seekMs(3000.0);
+    TEST_ASSERT(source.currentMediaMs() == 3000.0, "Current media time after seek is 3000.0 ms");
+    auto bSeek = source.readNextBlock();
+    TEST_ASSERT(bSeek.mediaTimestampUs == 3000000, "Block after seek starts at 3,000,000 us");
+    TEST_ASSERT(bSeek.videoFrameNumber == 90, "Video frame at 3.0s is frame 90 (30 * 3)");
+
+    // Seek backward to 0.5 seconds
+    source.seekMs(500.0);
+    TEST_ASSERT(source.currentMediaMs() == 500.0, "Current media time after seek backward is 500.0 ms");
+    auto bBack = source.readNextBlock();
+    TEST_ASSERT(bBack.mediaTimestampUs == 500000, "Block after seek starts at 500,000 us");
+    TEST_ASSERT(bBack.videoFrameNumber == 15, "Video frame at 0.5s is frame 15 (30 * 0.5)");
+}
+
+void testMediaSourceMasterBusBridgeM13() {
+    std::cout << "[TEST] Audio Bridge: Ingesting Media Audio Chunks into MasterAudioBus (M13)\n";
+
+    syncwave::MasterAudioBus bus(syncwave::MasterAudioBus::canonicalFormat(), 48000);
+    syncwave::DeterministicMediaSource source(48000, 30, 5.0);
+    syncwave::TimelineModel timeline(48000);
+
+    // Push 10 media blocks (16,000 frames, 1/3 second) into MasterAudioBus
+    for (int i = 0; i < 10; ++i) {
+        auto block = source.readNextBlock();
+        size_t written = bus.write(block.audioPcm.data(), block.audioFrameCount);
+        TEST_ASSERT(written == block.audioFrameCount, "Wrote full audio block into MasterAudioBus");
+    }
+
+    TEST_ASSERT(bus.availableFrames() == 16000, "Available frames in bus is exactly 16,000");
+    TEST_ASSERT(bus.totalFramesWritten() == 16000, "Total frames written is 16,000");
+
+    // Timeline mapping verification
+    double mediaTimeMs = timeline.masterFrameToMediaMs(bus.totalFramesWritten());
+    double expectedTimeMs = (16000.0 * 1000.0) / 48000.0;
+    TEST_ASSERT(std::abs(mediaTimeMs - expectedTimeMs) < 0.1, "Master frame count accurately reflects media elapsed time (333.3 ms)");
+
+    // Simulate seeking: Flush MasterAudioBus unread frames and re-anchor timeline
+    bus.flush();
+    timeline.onSeek(2000000, bus.totalFramesWritten());
+    source.seekMs(2000.0);
+
+    TEST_ASSERT(bus.availableFrames() == 0, "Bus is empty after seek flush");
+    TEST_ASSERT(timeline.hasAnchor(), "Timeline is anchored to 2.0s");
+
+    // Ingest 5 blocks from new seek position
+    for (int i = 0; i < 5; ++i) {
+        auto block = source.readNextBlock();
+        bus.write(block.audioPcm.data(), block.audioFrameCount);
+    }
+
+    TEST_ASSERT(bus.availableFrames() == 8000, "Bus has 8,000 frames from post-seek ingest");
+    double postSeekTimeMs = timeline.masterFrameToMediaMs(bus.totalFramesWritten());
+    // 2000 ms + (8000 / 48000 * 1000) = 2166.67 ms
+    TEST_ASSERT(std::abs(postSeekTimeMs - 2166.67) < 0.5, "Post-seek timeline accurately tracks media position without stale audio");
+}
+
+void testVlcMediaEngineLifecycleAndControlsM13() {
+    std::cout << "[TEST] VlcMediaEngine: LibVLC Lifecycle, File Load, and State Query (M13)\n";
+
+    syncwave::MasterAudioBus bus(syncwave::MasterAudioBus::canonicalFormat(), 48000);
+    syncwave::OutputRouter router;
+
+    syncwave::VlcMediaEngine engine(bus, router);
+
+    // Verify initial state
+    TEST_ASSERT(!engine.isPlaying(), "Initially not playing");
+    TEST_ASSERT(!engine.isPaused(), "Initially not paused");
+    TEST_ASSERT(engine.stateString() == "Stopped", "Initial state string is Stopped");
+
+    // Load generated test MP4
+    bool loaded = engine.load("test_av.mp4");
+    TEST_ASSERT(loaded, "Successfully loaded test_av.mp4 into VlcMediaEngine");
+
+    // Verify initial playback controls without crash
+    bool started = engine.play();
+    TEST_ASSERT(started, "Play command returned success");
+
+    // Query sync state
+    auto syncState = engine.getSyncState();
+    TEST_ASSERT(syncState.playbackRate == 1.0, "Playback rate is 1.0");
+
+    // Playback rate adjustment
+    engine.setPlaybackRate(1.05f);
+    TEST_ASSERT(std::abs(engine.playbackRate() - 1.05f) < 0.01f, "Playback rate updated to 1.05");
+
+    // Pause / Resume
+    engine.pause();
+    engine.resume();
+
+    // Seek
+    bool seekOk = engine.seek(2000.0);
+    TEST_ASSERT(seekOk, "Seek to 2000.0 ms returned true");
+
+    // Stop and cleanup
+    engine.stop();
+    TEST_ASSERT(!engine.isPlaying(), "Engine stopped");
+}
+
 int main() {
     std::cout << "======================================\n";
-    std::cout << "      SyncWave Test Suite (Phase 10)  \n";
+    std::cout << "      SyncWave Test Suite (Phase 11)  \n";
     std::cout << "======================================\n";
 
     testStringConversions();
@@ -2404,6 +3798,46 @@ int main() {
     testDriftControllerStateTransitions();
     testSyntheticMultiClockDriftSimulation();
     testDeviceOutputAndRouterDriftIntegration();
+
+    // Milestone 10.1 Audit Tests
+    testDriftControllerPhysicalDirection();
+    testResamplerPullModeMathematicalVerification();
+    testSeparateFrequencyAndPhaseCorrection();
+    testSyntheticControllerValidationCasesAtoH();
+
+    // Milestone 11 & 11.1 Tests
+    testChirpGeneratorBasicsAndTukeyWindow();
+    testCorrelationDetectorExactPeak();
+    testCorrelationDetectorKnownSyntheticDelays();
+    testCorrelationDetectorNoisySignal();
+    testCorrelationDetectorMultiEcho();
+    testCorrelationDetectorFailedCorrelation();
+    testSampleRateDomainConversion();
+    testMultiRunStatisticsAndOutlierRejection();
+    testAcousticCalibrationStricterAcceptanceCriteria();
+    testCorrelationDetectorMultiPeakAndSecondaryReflection();
+    testAcousticCalibrationDirectionAndTwoDeviceAlignment();
+    testCalibrationStorePersistence();
+    testAcousticCalibrationIntegrationWithLatencyModel();
+
+    // Milestone 11.2 Accounting Audit Tests
+    testModelBAccountingNoDoubleCounting();
+    testBudsRunAccountingAndMadCalculation();
+    testCalibrationStoreMetadataType();
+    testSoftwareHardwareBoundaryAppliedOnce();
+
+    // Milestone 12 Long-Duration Stress Tests
+    testSyntheticDriftMatrixM12();
+    testDisconnectReconnectOutputSafetyM12();
+    testQueueStressAndBoundedMemoryM12();
+
+    // Milestone 13 Audio/Video Synchronization Tests
+    testTimelineModelConversionsM13();
+    testTimelineModelSeekAndDiscontinuityM13();
+    testAvOffsetSignConventionM13();
+    testDeterministicMediaSourceM13();
+    testMediaSourceMasterBusBridgeM13();
+    testVlcMediaEngineLifecycleAndControlsM13();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

@@ -64,6 +64,9 @@ public:
     // Handle endpoint invalidation / unplug
     void onDeviceDisconnected(const std::string& deviceId);
 
+    // Handle endpoint reconnection
+    bool onDeviceReconnected(const std::string& deviceId);
+
     // Sample clocks across all active outputs simultaneously
     void sampleAllClocks(std::chrono::steady_clock::time_point timestamp = std::chrono::steady_clock::now());
 

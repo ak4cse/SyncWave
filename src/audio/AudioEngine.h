@@ -92,8 +92,9 @@ public:
     bool startCapture(const std::string& captureDeviceId, const std::vector<std::string>& outputDeviceIds);
     bool startCapture(const AudioDevice& captureDevice, const std::vector<AudioDevice>& outputDevices);
 
-    // Notify engine of endpoint disconnect / unplug
+    // Notify engine of endpoint disconnect / unplug / reconnect
     void onDeviceDisconnected(const std::string& deviceId);
+    bool onDeviceReconnected(const std::string& deviceId);
 
     // Stop playback/capture and threads
     void stop();

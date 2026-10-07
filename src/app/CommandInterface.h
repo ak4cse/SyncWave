@@ -26,7 +26,12 @@ private:
     int handleClockTestCommand(const std::vector<std::string>& args);
     int handleLatencyTestCommand(const std::vector<std::string>& args);
     int handleCalibrateCommand(const std::vector<std::string>& args);
+    int handleAcousticCalibrateCommand(const std::vector<std::string>& args);
+    int handleAcousticVerifyCommand(const std::vector<std::string>& args);
+    int handleStressCommand(const std::vector<std::string>& args);
+    int handleCalibrationCommand(const std::vector<std::string>& args);
     int handleStatusCommand(const std::vector<std::string>& args);
+    int handleMediaCommand(const std::vector<std::string>& args);
 
     std::unique_ptr<DeviceManager> deviceManager_;
     std::unique_ptr<AudioEngine> audioEngine_;

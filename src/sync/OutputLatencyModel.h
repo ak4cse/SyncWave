@@ -41,11 +41,17 @@ struct OutputLatencyModel {
     // Total observable software-path transit time
     double estimatedSoftwareLatencyMs = 0.0;  // wasapiStreamLatencyMs + wasapiPaddingMs + queueLatencyMs + resamplerLatencyMs
 
-    // Optional user-supplied physical acoustic offset (e.g. from acoustic chirp/mic measurement)
+    // Optional measured end-to-end acoustic arrival offset (from acoustic chirp/mic measurement)
     double optionalCalibrationOffsetMs = 0.0;
 
     // Effective latency used by the synchronization controller for alignment:
-    // effectiveLatencyMs = estimatedSoftwareLatencyMs + optionalCalibrationOffsetMs
+    // Under Model B (End-to-End Acoustic Arrival):
+    // If optionalCalibrationOffsetMs > 0.0:
+    //   effectiveLatencyMs = optionalCalibrationOffsetMs
+    //   (the acoustic arrival measurement already encompasses WASAPI driver buffering through acoustic capture;
+    //   software latency is NOT added again to prevent double-counting).
+    // If optionalCalibrationOffsetMs == 0.0:
+    //   effectiveLatencyMs = estimatedSoftwareLatencyMs
     double effectiveLatencyMs = 0.0;
 
     // Current synchronization state
@@ -54,7 +60,11 @@ struct OutputLatencyModel {
     // Helper: recalculates totals from current components
     void updateTotals() {
         estimatedSoftwareLatencyMs = wasapiStreamLatencyMs + wasapiPaddingMs + queueLatencyMs + resamplerLatencyMs;
-        effectiveLatencyMs = estimatedSoftwareLatencyMs + optionalCalibrationOffsetMs;
+        if (optionalCalibrationOffsetMs > 0.0) {
+            effectiveLatencyMs = optionalCalibrationOffsetMs;
+        } else {
+            effectiveLatencyMs = estimatedSoftwareLatencyMs;
+        }
     }
     void recalculate() { updateTotals(); }
 };

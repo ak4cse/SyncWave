@@ -14,3 +14,11 @@ compile_commands.json
 *.lib
 *.pdb
 New Text Document.md
+
+# Experiment telemetry and test data artifacts
+*.csv
+syncwave_av_sample.mp4
+test_av.mp4
+
+# Third-party precompiled import libraries
+third_party/libvlc/lib/

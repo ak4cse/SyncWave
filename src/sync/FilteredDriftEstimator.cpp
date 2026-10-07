@@ -20,6 +20,7 @@ FilteredDriftEstimator::FilteredDriftEstimator(
 
 void FilteredDriftEstimator::reset() {
     hasBaseline_ = false;
+    baselinePhaseOffsetSec_ = 0.0;
     filteredDriftPpm_ = 0.0;
     filteredPhaseErrorSec_ = 0.0;
     lastValidDriftPpm_ = 0.0;
@@ -33,8 +34,7 @@ FilteredDriftResult FilteredDriftEstimator::update(
     double windowSec)
 {
     FilteredDriftResult result;
-    result.rawPhaseErrorSec = targetPlayheadSec - outputPlayheadSec;
-    result.rawPhaseErrorMs = result.rawPhaseErrorSec * 1000.0;
+    const double rawOffset = targetPlayheadSec - outputPlayheadSec;
 
     ClockRateEstimate rateEstimate = clock.estimateRateOverWindow(windowSec);
 
@@ -50,8 +50,11 @@ FilteredDriftResult FilteredDriftEstimator::update(
         // Not enough data yet to establish or update reliable drift estimation
         if (hasBaseline_) {
             // Still update phase error filtering if baseline exists
-            filteredPhaseErrorSec_ = emaAlphaPhase_ * result.rawPhaseErrorSec +
+            double rawPhase = rawOffset - baselinePhaseOffsetSec_;
+            filteredPhaseErrorSec_ = emaAlphaPhase_ * rawPhase +
                                      (1.0 - emaAlphaPhase_) * filteredPhaseErrorSec_;
+            result.rawPhaseErrorSec = rawPhase;
+            result.rawPhaseErrorMs = rawPhase * 1000.0;
             result.filteredPhaseErrorSec = filteredPhaseErrorSec_;
             result.filteredPhaseErrorMs = filteredPhaseErrorSec_ * 1000.0;
             result.filteredDriftPpm = filteredDriftPpm_;
@@ -59,8 +62,10 @@ FilteredDriftResult FilteredDriftEstimator::update(
             result.confidence = 0.5 * (rateEstimate.sampleCount / static_cast<double>(minSamples_));
             result.isValid = true;
         } else {
-            result.filteredPhaseErrorSec = result.rawPhaseErrorSec;
-            result.filteredPhaseErrorMs = result.rawPhaseErrorMs;
+            result.rawPhaseErrorSec = 0.0;
+            result.rawPhaseErrorMs = 0.0;
+            result.filteredPhaseErrorSec = 0.0;
+            result.filteredPhaseErrorMs = 0.0;
             result.filteredDriftPpm = 0.0;
             result.rawDriftPpm = 0.0;
             result.confidence = 0.0;
@@ -89,6 +94,9 @@ FilteredDriftResult FilteredDriftEstimator::update(
     if (isOutlier) {
         result.isOutlierRejected = true;
         result.filteredDriftPpm = filteredDriftPpm_;
+        double rawPhase = hasBaseline_ ? (rawOffset - baselinePhaseOffsetSec_) : 0.0;
+        result.rawPhaseErrorSec = rawPhase;
+        result.rawPhaseErrorMs = rawPhase * 1000.0;
         result.filteredPhaseErrorSec = filteredPhaseErrorSec_;
         result.filteredPhaseErrorMs = filteredPhaseErrorSec_ * 1000.0;
         result.confidence = 0.2; // low confidence on outlier
@@ -98,22 +106,27 @@ FilteredDriftResult FilteredDriftEstimator::update(
 
     // Valid sample: apply Exponential Moving Average (EMA)
     if (!hasBaseline_) {
+        baselinePhaseOffsetSec_ = rawOffset;
         filteredDriftPpm_ = result.rawDriftPpm;
-        filteredPhaseErrorSec_ = result.rawPhaseErrorSec;
+        filteredPhaseErrorSec_ = 0.0;
         hasBaseline_ = true;
     } else {
+        double rawPhase = rawOffset - baselinePhaseOffsetSec_;
         filteredDriftPpm_ = emaAlphaDrift_ * result.rawDriftPpm +
                             (1.0 - emaAlphaDrift_) * filteredDriftPpm_;
-        filteredPhaseErrorSec_ = emaAlphaPhase_ * result.rawPhaseErrorSec +
+        filteredPhaseErrorSec_ = emaAlphaPhase_ * rawPhase +
                                  (1.0 - emaAlphaPhase_) * filteredPhaseErrorSec_;
     }
 
-    lastValidDriftPpm_ = result.rawDriftPpm;
-    validUpdateCount_++;
-
-    result.filteredDriftPpm = filteredDriftPpm_;
+    double rawPhase = rawOffset - baselinePhaseOffsetSec_;
+    result.rawPhaseErrorSec = rawPhase;
+    result.rawPhaseErrorMs = rawPhase * 1000.0;
     result.filteredPhaseErrorSec = filteredPhaseErrorSec_;
     result.filteredPhaseErrorMs = filteredPhaseErrorSec_ * 1000.0;
+    result.filteredDriftPpm = filteredDriftPpm_;
+
+    lastValidDriftPpm_ = result.rawDriftPpm;
+    validUpdateCount_++;
 
     // Confidence metric based on r^2 and observation duration relative to min observation requirement
     double durationRatio = std::min(1.0, rateEstimate.measurementDurationSec / std::max(minObservationSec_, 1.0));
