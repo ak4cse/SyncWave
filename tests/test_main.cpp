@@ -28,6 +28,9 @@
 #include "../src/av/TimelineModel.h"
 #include "../src/av/DeterministicMediaSource.h"
 #include "../src/av/VlcMediaEngine.h"
+#include "../src/core/ISyncWaveEngine.h"
+#include "../src/core/DiagnosticsSnapshot.h"
+#include "../src/core/SyncWaveConfig.h"
 
 #include <iostream>
 #include <cassert>
@@ -3735,6 +3738,37 @@ void testVlcMediaEngineLifecycleAndControlsM13() {
     TEST_ASSERT(!engine.isPlaying(), "Engine stopped");
 }
 
+void testSyncWavePublicEngineApiM14() {
+    std::cout << "[TEST] Public Engine API & Diagnostics Model (M14)\n";
+
+    auto engine = syncwave::createSyncWaveEngine();
+    TEST_ASSERT(engine != nullptr, "Engine instance successfully created");
+    TEST_ASSERT(!engine->isRunning(), "Engine initially not running");
+
+    // Device enumeration via public API
+    auto renderDevs = engine->enumerateOutputDevices(false);
+    TEST_ASSERT(!renderDevs.empty(), "Public API enumerates output devices");
+
+    auto capDevs = engine->enumerateCaptureDevices(false);
+    TEST_ASSERT(!capDevs.empty(), "Public API enumerates capture devices");
+
+    // Diagnostics snapshot query
+    auto diag = engine->getDiagnostics();
+    TEST_ASSERT(!diag.isEngineRunning, "Snapshot correctly reflects stopped state");
+    TEST_ASSERT(diag.masterSampleRate == 48000, "Snapshot reports master 48000 Hz");
+    TEST_ASSERT(diag.masterChannels == 2, "Snapshot reports stereo master bus");
+    TEST_ASSERT(diag.system.uptimeSec >= 0.0, "Snapshot reports non-negative uptime");
+    TEST_ASSERT(diag.system.memoryUsageMb > 0.0, "Snapshot reports positive memory usage");
+
+    // Mode configuration
+    engine->setSyncMode("software");
+    engine->setSyncMode("adaptive");
+
+    // Graceful stop on already stopped engine
+    engine->stop();
+    TEST_ASSERT(!engine->isRunning(), "Multiple stops are safe and idempotent");
+}
+
 int main() {
     std::cout << "======================================\n";
     std::cout << "      SyncWave Test Suite (Phase 11)  \n";
@@ -3838,6 +3872,9 @@ int main() {
     testDeterministicMediaSourceM13();
     testMediaSourceMasterBusBridgeM13();
     testVlcMediaEngineLifecycleAndControlsM13();
+
+    // Milestone 14 Public Engine & Diagnostics Model Tests
+    testSyncWavePublicEngineApiM14();
 
     std::cout << "======================================\n";
     std::cout << "Summary: " << g_testsPassed << " passed, " << g_testsFailed << " failed.\n";

@@ -23,7 +23,7 @@
 
 namespace syncwave {
 
-constexpr const char* SYNCWAVE_VERSION = "0.13.0";
+constexpr const char* SYNCWAVE_VERSION = "0.14.0";
 
 static std::atomic<bool> g_stopRequested{false};
 

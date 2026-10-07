@@ -111,7 +111,12 @@ bool VlcMediaEngine::load(const std::string& filePathOrUrl) {
     }
 
     currentPath_ = filePathOrUrl;
-    if (std::filesystem::exists(filePathOrUrl)) {
+    bool isUrl = (filePathOrUrl.find("://") != std::string::npos);
+    if (!isUrl && !std::filesystem::exists(filePathOrUrl)) {
+        return false;
+    }
+
+    if (!isUrl && std::filesystem::exists(filePathOrUrl)) {
         std::string absPath = std::filesystem::absolute(filePathOrUrl).string();
         currentMedia_ = libvlc_media_new_path(vlcInstance_, absPath.c_str());
     } else {

@@ -1,215 +1,182 @@
 # SyncWave
 
-**SyncWave** is a Windows real-time heterogeneous audio synchronization engine written in modern C++ (C++20).
+**SyncWave** is a Windows real-time heterogeneous multi-device audio synchronization engine and media playback pipeline written in modern C++ (C++20).
 
-SyncWave captures system audio (via WASAPI loopback) and renders it concurrently across multiple independent physical audio endpoints (Bluetooth earbuds, Bluetooth speakers, USB headsets, wired headphones, HDMI audio) while measuring and compensating for physical acoustic latency, buffering differences, and clock drift.
+SyncWave captures system audio (via WASAPI loopback) or streams containerized media (via LibVLC) and renders it concurrently across multiple independent physical audio endpoints (integrated speakers, Bluetooth earbuds, USB headsets, wired headphones, virtual audio sinks) while measuring and compensating for buffering differences, queue latency, and hardware clock drift.
 
 ---
 
 ## Architecture Principles
 
-1. **CLI First**: The audio engine and synchronization subsystems are developed and verified using command-line tools and reproducible experiments before adding any graphical interface.
-2. **Strict Separation of Planes**:
-   - **Audio Data Plane**: Real-time lock-free PCM movement (Capture -> RingBuffer -> DelayBuffer -> Renderer). No allocations, no mutexes, no console I/O in the render callback.
-   - **Timing Plane**: Logical master clock, endpoint clock monitoring, empirical latency estimation, and drift estimation.
-   - **Control Plane**: Device management, configuration, and user commands.
-3. **Empirical Measurement over Assumption**: No hardcoded latency or drift values; delays are calculated from direct measurement.
+1. **CLI & Engine First**: The real-time synchronization engine is completely decoupled from any presentation layer. All timing models, resamplers, and controllers are verified via automated mathematical tests and reproducible hardware benchmarks before adding a GUI.
+2. **Authoritative Master Timeline**: SyncWave maintains a single, continuous, monotonic Master Audio Timeline ($T_{\text{master}}$ @ 48 kHz Float32 stereo). Neither media sources (LibVLC) nor physical endpoints (Bluetooth DACs) dictate playback timing.
+3. **Strict Separation of Planes**:
+   - **Audio Data Plane**: Real-time lock-free PCM movement (`Capture / VLC -> MasterAudioBus -> OutputRouter -> DelayBuffer -> Sinc Resampler -> WASAPI`). No allocations, no mutexes, and no console I/O in render callbacks.
+   - **Timing Plane**: Logical master clock, endpoint clock linear regression (`DeviceClock`), out-of-band drift filtering (`FilteredDriftEstimator`), and dual feedforward/feedback closed-loop correction (`DriftController`).
+   - **Control Plane**: Endpoint device management, hot-plug notifications (`IMMNotificationClient`), and user commands.
+4. **Empirical Measurement over Assumption**: Delays and clock rates are measured directly from hardware clock queries and correlation detection.
 
 ---
 
-## Project Status
+## Project Status & Milestone Progression
 
-- [x] **Milestone 1 — Device Enumeration & CLI Foundation**
-  - Native Windows Core Audio endpoint enumeration (`IMMDeviceEnumerator`, `IMMDeviceCollection`).
-  - Friendly name resolution, device state tracking (Active, Disabled, Not Present, Unplugged), default endpoint identification.
-  - Decoupled `CommandInterface` and `DeviceManager` abstractions.
-  - Test suite with string/HRESULT unit tests and hardware integration tests.
-  - CLI command: `syncwave devices [--all]`
-- [x] **Milestone 2 — Hot-Plug & Device Notifications** (`IMMNotificationClient`)
-  - Real-time detection of endpoint added, removed, state changed, default changed, and property changed.
-  - Atomic COM reference counting and thread-safe MTA callback handling.
-  - Decoupled `DeviceEvent` queue avoiding COM dependencies in CLI.
-  - CLI command: `syncwave watch [--timeout <sec>]`
-- [x] **Milestone 3 — WASAPI Single Renderer & Test Tone**
-  - Native WASAPI shared event-driven audio renderer (`WasapiOutput`).
-  - High-priority MMCSS ("Pro Audio") render thread with zero busy-waiting.
-  - Pure mathematical `ToneGenerator` supporting Float32 / PCM with continuous phase tracking.
-  - Hardware clock tracking via `IAudioClock`.
-  - CLI command: `syncwave tone [--device <id|index>] [--frequency <Hz>] [--duration <sec>] [--volume <0..1>]`
-- [x] **Milestone 4 — Master Audio Bus & Real-Time Ring Buffer**
-  - Lock-free Single-Producer / Single-Consumer (SPSC) circular buffer (`RingBuffer`).
-  - Central canonical audio timeline (`MasterAudioBus`) with bounded preallocated storage.
-  - Decoupled pipeline: `ToneGenerator -> MasterAudioBus -> WasapiOutput`.
-  - CLI commands: `syncwave tone`, `syncwave status`.
-- [x] **Milestone 5 — WASAPI Loopback Capture & Real-Time Resampling**
-  - Native WASAPI loopback capture client (`WasapiCapture`) on render endpoints.
-  - High-priority MMCSS ("Capture") thread with silence packet translation.
-  - Output-boundary linear interpolation sample rate converter (`Resampler`).
-  - Live system audio pipeline: `Windows Audio -> WASAPI Loopback -> MasterAudioBus -> Resampler -> WasapiOutput -> Hardware`.
-  - CLI command: `syncwave capture [--source <id|index>] [--output <id|index>] [--duration <sec>]`
-- [x] **Milestone 6 — Multiple Simultaneous WASAPI Outputs & OutputRouter**
-  - Dedicated fan-out router (`OutputRouter`) acting as sole consumer of `MasterAudioBus`.
-  - Independent per-output pipelines (`DeviceOutput`) with isolated 1.0s SPSC queues, dedicated resamplers, and MMCSS render threads.
-  - Non-destructive queue overflow protection and hot-unplug tolerance.
-  - Concurrent multi-endpoint rendering across heterogeneous devices (e.g. 48.0 kHz Realtek + 44.1 kHz Bluetooth realme Buds T310).
-  - CLI commands: `syncwave tone --outputs 2,3`, `syncwave capture --outputs 2,3`
-- [x] **Milestone 7 — Timing & Clock Measurement Infrastructure**
-  - Low-level WASAPI hardware clock querying (`IAudioClock`, `IAudioClient::GetCurrentPadding`, `GetStreamLatency`).
-  - Sliding-window Ordinary Least Squares (OLS) linear regression clock rate modeling (`DeviceClock`) reporting effective rate ($Hz$) and nominal error ($ppm$).
-  - Pairwise relative drift estimation (`DriftEstimator`) computing rate ratios, relative drift ($ppm$), and playhead offset ($ms$).
-  - Non-intrusive 10 Hz out-of-band sampling maintaining zero contention and real-time safety on WASAPI render threads.
-  - Physical acoustic latency vs software latency domain distinction.
-- [x] **Milestone 8 — Relative Latency & Timing Model Validation**
-  - Multi-window clock convergence analysis (`DeviceClock::estimateRateOverWindow`) resolving the Bluetooth startup ramp artifact.
-  - Mathematical separation of instantaneous offset ($T_A - T_B$) from accumulated drift ($\Delta\text{Offset}$) and drift rate ($ppm$).
-  - End-to-end stream playhead estimation (`estimatedAppPlayheadFrames/Sec`, `wasapiClockPlayheadSec`, `playheadDiscrepancyMs`).
-  - Deterministic transient pulse generator (`SyncPulseGenerator`) for repeatable software latency evaluation.
-  - High-precision 60s clock experiment: `syncwave clock-test --outputs 2,3 --duration 60`
-  - Deterministic transient latency experiment: `syncwave latency-test --outputs 2,3 --runs 5`
-  - Honest physical acoustic latency assessment distinguishing software driver latency from physical acoustic emission.
-- [x] **Milestone 9 — Fixed Software-Domain Output Alignment & Per-Output Delay Stage**
-  - Per-output circular delay lines (`DelayBuffer`) placed **after** resampling at native device sample rates ($f_{\text{dev}}$).
-  - Preallocated stereo Float32 circular buffer with initial silence prefill; lock-free atomic `delayFrames_` updates; zero allocation in audio callback.
-  - Audited latency taxonomy (`OutputLatencyModel`): stream latency, mixer padding, queue latency, resampler group delay, configured delay, and manual calibration offsets.
-  - Synchronization engine (`SyncController`) aligning all endpoints to the slowest path ($T_{\text{target}} = \max_i(L_i)$, $D_i = T_{\text{target}} - L_i$).
-  - Explicit synchronization states (`Disabled`, `Manual`, `SoftwareCalibrated`, `PhysicallyCalibrated`, `Uncertain`).
-  - New CLI subcommand: `syncwave calibrate [--outputs <indices|ids>] [--offsets <o0,o1,...>]`
-  - Delay configuration flags across playback commands: `--delay <d0,d1,...>`, `--sync <software|manual|none>`, `--offsets <o0,o1,...>`
-  - Explicit physical acoustic latency disclaimers distinguishing software driver buffers from Bluetooth A2DP RF transport, DAC filters, and speaker acoustics.
-  - Expanded test suite: 494 passing automated unit and integration tests.
-- [x] **Milestone 10 — Controlled Long-Term Clock Drift Correction**
-  - Continuous micro-resampling rate adjustment in software (`Resampler`) with per-frame slew rate limiting ($\le 5.0\text{ ppm/s}$).
-  - Filtered drift estimation (`FilteredDriftEstimator`) enforcing minimum observation duration ($\ge 5.0\text{ s}$, $\ge 30\text{ samples}$), outlier rejection ($|\text{drift}| > 500\text{ ppm}$, $r^2 < 0.90$, rate jump $> 375\text{ ppm}$), and dual EMA smoothing ($\alpha_{\text{drift}} = 0.15$, $\alpha_{\text{phase}} = 0.20$).
-  - Closed-loop feedback controller (`DriftController`) with feedforward drift cancellation ($u_{\text{FF}} = -D$), proportional phase compensation ($K_p = 10.0\text{ ppm/ms}$), $\pm 1.0\text{ ms}$ deadband, and hard clamp to $\pm 100\text{ ppm}$.
-  - Real-time render thread remains strictly lock-free and zero-allocation; control updates run asynchronously at 10 Hz.
-  - New synchronization mode: `--sync adaptive` (performs initial delay alignment and maintains active drift correction).
-  - Expanded test suite: 560 passing tests including discrete synthetic multi-clock drift simulations over 1, 5, and 10 minutes.
-- [ ] **Milestone 11 — Automatic Calibration**
+- [x] **Milestones 1–6: WASAPI Multi-Endpoint Engine Foundation**
+  - Core Audio endpoint enumeration and hot-plug detection (`IMMNotificationClient`).
+  - High-priority MMCSS (`Pro Audio`) event-driven WASAPI shared renderers (`WasapiOutput`).
+  - Lock-free Single-Producer / Single-Consumer (SPSC) circular buffers (`RingBuffer`, `MasterAudioBus`).
+  - WASAPI loopback capture (`WasapiCapture`) and fan-out distribution router (`OutputRouter`).
+  - Concurrent multi-endpoint rendering across heterogeneous sample rates (e.g. 48.0 kHz Realtek + 44.1 kHz Bluetooth realme Buds T310).
+- [x] **Milestones 7–8: Hardware Clock Modeling & Playhead Telemetry**
+  - Hardware clock regression modeling (`DeviceClock`) using Ordinary Least Squares (OLS) linear regression.
+  - Multi-window convergence analysis (1s, 5s, 10s, 30s, 60s) isolating Bluetooth startup ramp artifacts.
+  - Pairwise relative drift estimation and software playhead tracking.
+- [x] **Milestone 9: Static Delay Alignment & DelayStage**
+  - Lock-free post-resampling delay buffers (`DelayBuffer`) aligning endpoints to the slowest path ($T_{\text{target}} = \max_i(L_i)$).
+  - Explicit synchronization state tracking (`Disabled`, `SoftwareCalibrated`, `PhysicallyCalibrated`, `Uncertain`).
+- [x] **Milestone 10: Controlled Closed-Loop Clock Drift Correction**
+  - Sinc micro-resampling with per-frame slew rate limiting ($\le 5.0\text{ ppm/s}$).
+  - Filtered drift estimation (`FilteredDriftEstimator`) with outlier rejection and dual EMA smoothing ($\alpha_{\text{drift}} = 0.15$, $\alpha_{\text{phase}} = 0.20$).
+  - Closed-loop feedback controller (`DriftController`) with feedforward cancellation ($u_{\text{FF}} = -D$), proportional phase compensation ($K_p = 10.0\text{ ppm/ms}$), and $\pm 100\text{ ppm}$ clamp.
+- [x] **Milestone 11: Acoustic Calibration Infrastructure & Verification**
+  - Logarithmic sine chirp generation (`ChirpGenerator`) and Tukey-windowed matched filtering (`CorrelationDetector`).
+  - Model B End-to-End Acoustic Arrival accounting ($L_{\text{arrival}}$ eliminates double-counting of software driver latency).
+  - Physical delay shift experimentally verified on Realtek speakers ($+24.15\text{ ms}$ observed for $+24.28\text{ ms}$ commanded, $0.13\text{ ms}$ error).
+- [x] **Milestone 12: Long-Duration Synchronization Stress Validation**
+  - 180-second adaptive correction stress tests with zero WASAPI underruns, zero queue overflows, and bounded memory footprints.
+  - Disconnect and reconnect fault recovery allowing endpoints to gracefully rejoin the master timeline without engine reinitialization.
+- [x] **Milestone 13: Audio/Video Synchronization Architecture & LibVLC Integration**
+  - Formal 7-clock timeline hierarchy establishing deterministic mapping between container $\text{PTS}_{\text{media}}$ and $T_{\text{master}}$ frames.
+  - LibVLC 3.0.x integration via memory audio callbacks (`amem` Float32 48 kHz stereo) pushing into `MasterAudioBus`.
+  - Seek, pause, resume, and flush safety preserving cumulative frame counters across discontinuities.
+  - Live 3-output concurrent media streaming with microsecond-resolution A/V telemetry logging.
+- [x] **Milestone 14: Production Hardening, Release Baseline & GUI Readiness**
+  - Clean public engine interface (`ISyncWaveEngine`) and complete telemetry snapshot model (`DiagnosticsSnapshot`).
+  - Comprehensive operational release runbook (`docs/release.md`) and GUI readiness contract (`docs/gui-api.md`).
+  - 1,272 automated unit, regression, and mathematical tests passing with zero failures.
+
+---
+
+## Honest Technical Boundaries & Operational Limitations
+
+SyncWave prioritizes scientific honesty over marketing claims:
+
+1. **No "Zero Latency" Claim**:
+   - Heterogeneous output alignment requires delaying faster endpoints to match the slowest endpoint in the system ($\max_i(L_i)$). Total system playback delay equals the latency of the slowest active device (typically Bluetooth A2DP, which introduces $100\text{--}180\text{ ms}$ of buffer delay).
+2. **Free-Air Bluetooth Earbud Acoustic Measurement Limitation (M11)**:
+   - While DelayBuffer physical shifting is verified within $0.13\text{ ms}$ on local speakers, free-air acoustic arrival measurements over Bluetooth earbuds (such as realme Buds T310) exhibit high acoustic variance and noise sensitivity. In uncalibrated setups, SyncWave safely uses measured software driver latency.
+3. **LibVLC Video-Clock Slaving Limitation (M13)**:
+   - LibVLC 3.x does not expose an external display clock slaving callback to lock video presentation to external audio sample clocks. SyncWave measures and logs instantaneous A/V offset with microsecond precision, but does not manipulate LibVLC video frame dropping.
 
 ---
 
 ## Prerequisites & Building
 
 ### Prerequisites
-- Windows 10/11
-- CMake 3.20+
-- C++20 compatible compiler (MSVC 2022+ or GCC 13+ / MinGW-w64 UCRT64)
-- Ninja or MSBuild
+- **Operating System**: Windows 10/11 (64-bit)
+- **Compiler**: GCC 13+ / MinGW-w64 (UCRT64) or Visual Studio 2022+ (C++20 required)
+- **Build System**: CMake 3.20+ with Ninja
+- **Media Engine**: VLC Media Player 64-bit installed (Default: `C:\Program Files\VideoLAN\VLC`)
 
-### Build Instructions
+### Build Instructions (MinGW-w64 UCRT64 & Ninja)
 
-Using Ninja & GCC / UCRT64:
 ```powershell
-$env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+# Add toolchain and VLC to path
+$env:PATH = "C:\Program Files\VideoLAN\VLC;C:\msys64\ucrt64\bin;$env:PATH"
+
+# Configure Release build
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
 
-Using Visual Studio:
-```powershell
-cmake -B build -G "Visual Studio 17 2022" -A x64
+# Build core library, CLI, and test runner
 cmake --build build --config Release
+
+# Run complete automated test suite (1,272 tests)
+.\build\syncwave_tests.exe
 ```
 
 ---
 
-## Running
+## Example CLI Commands
 
-### Enumerate Audio Devices
+### 1. Enumerate Audio Endpoints
 ```powershell
 # List active output endpoints
 .\build\syncwave.exe devices
 
-# List all endpoints including unplugged/disabled devices
+# List all endpoints including disabled/unplugged
 .\build\syncwave.exe devices --all
 ```
 
-### Watch Audio Device Events in Real Time
+### 2. Multi-Endpoint Synthetic Tone Playback
 ```powershell
-# Run device event monitor (hot-plug, default device change, disconnects)
-.\build\syncwave.exe watch
-
-# Or run with a timeout (in seconds)
-.\build\syncwave.exe watch --timeout 10
+# Play 440 Hz tone across endpoints 2 and 3 with adaptive drift correction
+.\build\syncwave.exe tone --outputs 2,3 --sync adaptive --duration 10
 ```
 
-### Capture Windows System Audio via WASAPI Loopback
+### 3. Capture & Route Windows System Audio (WASAPI Loopback)
 ```powershell
-# Capture from default render endpoint and play through default output for 5 seconds
-.\build\syncwave.exe capture
-
-# Capture from Realtek Speakers [3] and route concurrently to Bluetooth Buds [2] and Realtek [3]
-.\build\syncwave.exe capture --source 3 --outputs 2,3 --duration 10
-
-# Repeated -o / --output syntax is also supported
-.\build\syncwave.exe capture --source 3 -o 2 -o 3 --duration 5
-
-# Continuous multi-device streaming until Ctrl+C
-.\build\syncwave.exe capture --source 3 --outputs 2,3 --duration 0
+# Capture default Windows audio and route to Bluetooth Buds (2) and Realtek Speakers (3)
+.\build\syncwave.exe capture --outputs 2,3 --sync adaptive --duration 30
 ```
 
-### Play Synthetic Test Tone
+### 4. Play Media Files via LibVLC Synchronization Engine
 ```powershell
-# Play 440 Hz test tone on default output for 5 seconds
-.\build\syncwave.exe tone
-
-# Play simultaneously across multiple endpoints
-.\build\syncwave.exe tone --outputs 2,3 --duration 5
-
-# Play on specific device index with custom parameters
-.\build\syncwave.exe tone -o 2 --frequency 440 --duration 10 --volume 0.25
-
-# Play continuous tone across multiple endpoints until Ctrl+C
-.\build\syncwave.exe tone --outputs 2,3 --duration 0
+# Play MP4 video/audio synchronized across 3 endpoints with telemetry logging
+.\build\syncwave.exe media sample.mp4 --outputs 3,2,0 --sync adaptive --csv media_telemetry.csv
 ```
 
-### High-Precision 60-Second Clock Stability Experiment
+### 5. Multi-Device Long-Duration Stress Testing
 ```powershell
-# Run continuous 60s experiment with multi-window convergence table (1s, 5s, 10s, 30s, 60s)
-.\build\syncwave.exe clock-test --outputs 2,3 --duration 60
+# Run 30-minute stress test with 1-second telemetry logging
+.\build\syncwave.exe stress --outputs 3,2 --duration 1800 --csv stress_log.csv
 ```
 
-### Deterministic Transient & Relative Latency Experiment
-```powershell
-# Run 5 repeated impulse runs to evaluate software-path latency repeatability
-.\build\syncwave.exe latency-test --outputs 2,3 --runs 5
+---
+
+## Public Engine API Boundary (GUI Readiness)
+
+Future presentation layers (e.g., Qt, WinUI 3) interact exclusively through the abstract `ISyncWaveEngine` interface defined in [`src/core/ISyncWaveEngine.h`](file:///c:/Dev/Projects/SyncWave/src/core/ISyncWaveEngine.h):
+
+```cpp
+#include "core/ISyncWaveEngine.h"
+
+auto engine = syncwave::createSyncWaveEngine();
+
+// Enumerate available endpoints
+auto outputs = engine->enumerateOutputDevices(true);
+
+// Start synchronized media playback
+engine->setSyncMode("adaptive");
+engine->startMedia("movie.mp4", {"{device_id_1}", "{device_id_2}"});
+
+// Query diagnostics snapshot at 10-30 Hz
+auto diag = engine->getDiagnostics();
+std::cout << "Process CPU: " << diag.system.processCpuPercent << "%\n";
+std::cout << "Working Set: " << diag.system.memoryUsageMb << " MB\n";
 ```
 
-### Software Latency Calibration & Delay Assessment
-```powershell
-# Probe target endpoints and compute automatic software delay compensation
-.\build\syncwave.exe calibrate --outputs 2,3
+Full GUI architecture and integration specifications are documented in [`docs/gui-api.md`](file:///c:/Dev/Projects/SyncWave/docs/gui-api.md).
 
-# Probe endpoints with manual acoustic calibration offsets (in milliseconds)
-.\build\syncwave.exe calibrate --outputs 2,3 --offsets 0,50
-```
+---
 
-### Playback with Delay Alignment & Drift Correction
-```powershell
-# Play test tone with automatic software latency alignment
-.\build\syncwave.exe tone --outputs 2,3 --sync software --duration 5
+## Testing & Quality Assurance
 
-# Play test tone with adaptive software alignment AND dynamic drift correction
-.\build\syncwave.exe tone --outputs 2,3 --sync adaptive --duration 30
+SyncWave includes 1,272 automated unit and integration tests covering:
+- Lock-free ring buffer concurrency and boundary invariants
+- Sinc interpolation micro-resampling rate stability
+- Dual EMA drift estimator filtering and outlier rejection
+- DriftController deadband, clamping, and disturbance recovery
+- Media PTS $\leftrightarrow$ Master Frame bidirectional mapping
+- Rapid seeking, pausing, and discontinuity flush integrity
+- Multi-output disconnect/reconnect lifecycle safety
+- Public engine API lifecycle and diagnostics query
 
-# Stream system audio loopback with adaptive drift correction
-.\build\syncwave.exe capture --source 3 --outputs 2,3 --sync adaptive --duration 60
-
-# Play test tone with explicit manual delays (e.g. 50ms on device 0, 0ms on device 1)
-.\build\syncwave.exe tone --outputs 2,3 --delay 50,0 --duration 5
-
-# Stream system audio loopback with manual delays
-.\build\syncwave.exe capture --source 3 --outputs 2,3 --delay 50,0 --duration 10
-```
-
-### Check Status & Telemetry
-```powershell
-.\build\syncwave.exe status
-```
-
-### Running Tests
+To run tests:
 ```powershell
 .\build\syncwave_tests.exe
-# or via CTest:
-ctest --test-dir build --output-on-failure
 ```
+
+---
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
