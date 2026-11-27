@@ -20,12 +20,65 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     --text-dim: #a1a1aa;
     --text-muted: #71717a;
     --mint: #00e599;
+    --mint-ink: #000000;
     --amber: #ffb800;
     --crimson: #ff3355;
     --cyan: #00d2ff;
+    --shadow-card: 4px 4px 0px #1e1e26;
+    --shadow-btn: 3px 3px 0px #ffffff;
+    --border-w: 2px;
     --radius: 2px;
+    --thumb-w: 13px;
+    --thumb-h: 22px;
+    --thumb-radius: 0px;
     --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
     --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+  }
+
+  /* Light Mode Palette */
+  body[data-theme="light"] {
+    --bg: #f3f4f6;
+    --surface: #ffffff;
+    --surface-2: #e5e7eb;
+    --surface-3: #d1d5db;
+    --border: #d1d5db;
+    --border-hi: #111827;
+    --text: #09090b;
+    --text-dim: #4b5563;
+    --text-muted: #6b7280;
+    --mint: #059669;
+    --mint-ink: #ffffff;
+    --amber: #d97706;
+    --crimson: #e11d48;
+    --cyan: #0284c7;
+    --shadow-card: 4px 4px 0px #111827;
+    --shadow-btn: 3px 3px 0px #111827;
+  }
+
+  /* Style 2: Studio (Rounded, soft 1px hairline) */
+  body[data-style="studio"] {
+    --radius: 10px;
+    --border-w: 1px;
+    --thumb-w: 16px;
+    --thumb-h: 16px;
+    --thumb-radius: 50%;
+    --shadow-card: 0 4px 16px rgba(0, 0, 0, 0.28);
+    --shadow-btn: 0 2px 8px rgba(0, 229, 153, 0.25);
+  }
+  body[data-style="studio"][data-theme="light"] {
+    --shadow-card: 0 2px 10px rgba(0, 0, 0, 0.06);
+    --shadow-btn: 0 2px 8px rgba(5, 150, 105, 0.22);
+  }
+
+  /* Style 3: Minimal (Flat, crisp, zero shadows) */
+  body[data-style="minimal"] {
+    --radius: 4px;
+    --border-w: 1px;
+    --thumb-w: 10px;
+    --thumb-h: 18px;
+    --thumb-radius: 2px;
+    --shadow-card: none;
+    --shadow-btn: none;
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
@@ -52,16 +105,16 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 22px;
-    background: var(--bg);
-    border-bottom: 2px solid var(--border);
-    gap: 16px;
+    padding: 12px 20px;
+    background: var(--surface);
+    border-bottom: var(--border-w) solid var(--border);
+    gap: 12px;
   }
 
   .brand {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 11px;
   }
 
   .brand-mark {
@@ -69,21 +122,16 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     height: 34px;
     border-radius: var(--radius);
     background: var(--mint);
-    color: #000000;
-    border: 2px solid #ffffff;
-    box-shadow: 3px 3px 0px #272730;
+    color: var(--mint-ink);
+    border: var(--border-w) solid var(--border-hi);
+    box-shadow: var(--shadow-btn);
     display: grid;
     place-items: center;
   }
 
-  .brand-title {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-  }
-
+  .brand-title { display: flex; flex-direction: column; gap: 2px; }
   .brand-name {
-    font-size: 16px;
+    font-size: 15.5px;
     font-weight: 800;
     letter-spacing: 0.04em;
     text-transform: uppercase;
@@ -95,32 +143,26 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     align-items: center;
     gap: 6px;
     font-family: var(--mono);
-    font-size: 10.5px;
+    font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-muted);
   }
-
-  .dot {
-    width: 7px;
-    height: 7px;
-    background: var(--text-muted);
-  }
-
+  .dot { width: 7px; height: 7px; border-radius: var(--radius); background: var(--text-muted); }
   .status-pill.live { color: var(--mint); }
   .status-pill.live .dot { background: var(--mint); }
 
   .header-controls {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
   }
 
   .segmented {
     display: inline-flex;
-    background: var(--surface);
-    border: 2px solid var(--border);
+    background: var(--bg);
+    border: var(--border-w) solid var(--border);
     border-radius: var(--radius);
     padding: 2px;
     gap: 2px;
@@ -131,84 +173,92 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     border: none;
     color: var(--text-dim);
     font-family: var(--mono);
-    font-size: 11px;
+    font-size: 10.5px;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 6px 11px;
+    letter-spacing: 0.04em;
+    padding: 5px 9px;
     border-radius: var(--radius);
     cursor: pointer;
   }
   .seg-btn:hover { color: var(--text); }
   .seg-btn.active {
-    background: #ffffff;
-    color: #000000;
+    background: var(--border-hi);
+    color: var(--bg);
   }
+
+  .style-select {
+    height: 32px;
+    padding: 0 8px;
+    border-radius: var(--radius);
+    border: var(--border-w) solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    outline: none;
+  }
+  .style-select:hover { border-color: var(--border-hi); }
 
   .btn-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 34px;
-    height: 34px;
+    width: 32px;
+    height: 32px;
     border-radius: var(--radius);
-    border: 2px solid var(--border);
-    background: var(--surface);
+    border: var(--border-w) solid var(--border);
+    background: var(--surface-2);
     color: var(--text);
+    font-family: var(--mono);
+    font-weight: 800;
+    font-size: 13px;
     cursor: pointer;
-    box-shadow: 2px 2px 0px #272730;
-    transition: transform 0.08s, box-shadow 0.08s;
+    transition: transform 0.08s;
   }
-  .btn-icon:hover { border-color: #ffffff; }
-  .btn-icon:active { transform: translate(2px, 2px); box-shadow: 0px 0px 0px #000; }
+  .btn-icon:hover { border-color: var(--border-hi); }
+  .btn-icon:active { transform: translate(1px, 1px); }
 
   .btn-primary {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 18px;
+    padding: 7px 16px;
     border-radius: var(--radius);
-    border: 2px solid #ffffff;
+    border: var(--border-w) solid var(--border-hi);
     background: var(--mint);
-    color: #000000;
+    color: var(--mint-ink);
     font-family: var(--mono);
     font-size: 12px;
     font-weight: 800;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     cursor: pointer;
-    box-shadow: 3px 3px 0px #ffffff;
+    box-shadow: var(--shadow-btn);
     transition: transform 0.08s, box-shadow 0.08s;
   }
-  .btn-primary:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0px #ffffff; }
-  .btn-primary:active { transform: translate(2px, 2px); box-shadow: 0px 0px 0px #ffffff; }
-
+  .btn-primary:hover { transform: translate(-1px, -1px); }
+  .btn-primary:active { transform: translate(2px, 2px); box-shadow: none; }
   .btn-primary.stop {
     background: var(--crimson);
     color: #ffffff;
-    border-color: #ffffff;
-    box-shadow: 3px 3px 0px #ffffff;
   }
 
-  /* Main content */
+  /* Main */
   .main {
     flex: 1;
     overflow-y: auto;
-    padding: 18px 22px;
+    padding: 16px 20px;
     display: flex;
     flex-direction: column;
-    gap: 14px;
+    gap: 13px;
   }
-
   .main::-webkit-scrollbar { width: 6px; }
   .main::-webkit-scrollbar-thumb { background: var(--border); }
 
-  .section-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
+  .section-head { display: flex; align-items: center; justify-content: space-between; }
   .section-title {
     font-family: var(--mono);
     font-size: 11px;
@@ -217,11 +267,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     letter-spacing: 0.08em;
     color: var(--text);
   }
-
-  .section-sub {
-    font-size: 11.5px;
-    color: var(--text-muted);
-  }
+  .section-sub { font-size: 11.5px; color: var(--text-muted); }
 
   .banner {
     display: none;
@@ -234,79 +280,52 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
   .banner.show { display: flex; }
   .banner.error {
-    background: #23060c;
-    border: 2px solid var(--crimson);
-    color: #ffffff;
-    box-shadow: 3px 3px 0px var(--crimson);
+    background: rgba(255, 51, 85, 0.14);
+    border: var(--border-w) solid var(--crimson);
+    color: var(--text);
   }
   .banner.hint {
-    background: #141000;
-    border: 2px solid var(--amber);
-    color: #fde68a;
-    box-shadow: 3px 3px 0px var(--amber);
+    background: rgba(255, 184, 0, 0.10);
+    border: var(--border-w) solid var(--amber);
+    color: var(--text);
   }
-  .banner strong { color: #ffffff; font-weight: 700; }
   .kbd {
     display: inline-block;
     padding: 1px 6px;
-    background: #000000;
-    border: 2px solid var(--amber);
+    background: var(--bg);
+    border: var(--border-w) solid var(--amber);
+    border-radius: var(--radius);
     font-family: var(--mono);
     font-size: 11px;
     font-weight: 700;
     color: var(--amber);
   }
 
-  .device-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
+  .device-list { display: flex; flex-direction: column; gap: 12px; }
 
   .device-card {
     background: var(--surface);
-    border: 2px solid var(--border);
+    border: var(--border-w) solid var(--border);
     border-radius: var(--radius);
     padding: 14px 16px;
     transition: border-color 0.12s, opacity 0.12s;
   }
-
   .device-card.enabled {
     border-color: var(--border-hi);
-    box-shadow: 4px 4px 0px #1e1e26;
+    box-shadow: var(--shadow-card);
   }
+  .device-card.disabled { opacity: 0.55; }
 
-  .device-card.disabled {
-    opacity: 0.52;
-  }
+  .device-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .device-id-group { display: flex; align-items: center; gap: 12px; min-width: 0; }
 
-  .device-top {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-  }
-
-  .device-id-group {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    min-width: 0;
-  }
-
-  /* Brutalist Square Toggle */
-  .switch {
-    position: relative;
-    width: 40px;
-    height: 22px;
-    flex-shrink: 0;
-  }
+  .switch { position: relative; width: 40px; height: 22px; flex-shrink: 0; }
   .switch input { opacity: 0; width: 0; height: 0; }
   .switch-track {
     position: absolute;
     inset: 0;
-    background: #000000;
-    border: 2px solid var(--border);
+    background: var(--bg);
+    border: var(--border-w) solid var(--border);
     border-radius: var(--radius);
     cursor: pointer;
     transition: background 0.12s, border-color 0.12s;
@@ -318,16 +337,20 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     left: 2px;
     width: 14px;
     height: 14px;
+    border-radius: var(--radius);
     background: var(--text-muted);
     transition: transform 0.12s, background 0.12s;
   }
+  body[data-style="studio"] .switch-track,
+  body[data-style="studio"] .switch-track::after { border-radius: 999px; }
+
   .switch input:checked + .switch-track {
     background: var(--mint);
-    border-color: #ffffff;
+    border-color: var(--border-hi);
   }
   .switch input:checked + .switch-track::after {
     transform: translateX(18px);
-    background: #000000;
+    background: var(--mint-ink);
   }
 
   .dev-icon {
@@ -335,19 +358,14 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     height: 32px;
     border-radius: var(--radius);
     background: var(--surface-2);
-    border: 2px solid var(--border);
+    border: var(--border-w) solid var(--border);
     display: grid;
     place-items: center;
     color: var(--text);
     flex-shrink: 0;
   }
 
-  .dev-meta {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-  }
-
+  .dev-meta { display: flex; flex-direction: column; min-width: 0; }
   .dev-name {
     font-size: 14px;
     font-weight: 700;
@@ -356,21 +374,15 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     overflow: hidden;
     text-overflow: ellipsis;
   }
-
-  .dev-tags {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-top: 3px;
-  }
-
+  .dev-tags { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
   .tag {
     font-family: var(--mono);
     font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
     padding: 1px 6px;
-    background: #000000;
+    border-radius: var(--radius);
+    background: var(--bg);
     border: 1px solid var(--border);
     color: var(--text-dim);
   }
@@ -383,44 +395,31 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     font-weight: 700;
     text-transform: uppercase;
     padding: 4px 9px;
-    background: #000000;
-    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg);
+    border: var(--border-w) solid var(--border);
     color: var(--text-dim);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
   .dev-badge.locked {
-    color: #000000;
+    color: var(--mint-ink);
     background: var(--mint);
-    border-color: #ffffff;
+    border-color: var(--border-hi);
   }
 
-  /* Controls grid inside active card */
   .device-controls {
     display: grid;
     grid-template-columns: 1fr 1.25fr;
     gap: 18px;
     margin-top: 14px;
     padding-top: 13px;
-    border-top: 2px solid var(--border);
+    border-top: var(--border-w) solid var(--border);
   }
+  .device-card.disabled .device-controls { display: none; }
 
-  .device-card.disabled .device-controls {
-    display: none;
-  }
-
-  .ctrl-group {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .ctrl-label-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-
+  .ctrl-group { display: flex; flex-direction: column; gap: 8px; }
+  .ctrl-label-row { display: flex; align-items: center; justify-content: space-between; }
   .ctrl-label {
     font-family: var(--mono);
     font-size: 10.5px;
@@ -429,7 +428,6 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     letter-spacing: 0.05em;
     color: var(--text-dim);
   }
-
   .ctrl-val {
     font-family: var(--mono);
     font-size: 12.5px;
@@ -437,73 +435,60 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
+  .slider-row { display: flex; align-items: center; gap: 7px; }
 
-  .slider-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-
-  /* Brutalist Fader */
   input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
     flex: 1;
-    height: 8px;
+    height: 7px;
+    border-radius: var(--radius);
     background: var(--surface-3);
     border: 1px solid var(--border);
     outline: none;
     cursor: pointer;
   }
-
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 13px;
-    height: 22px;
-    background: #ffffff;
-    border: 2px solid #000000;
-    box-shadow: 2px 2px 0px #000000;
+    width: var(--thumb-w);
+    height: var(--thumb-h);
+    border-radius: var(--thumb-radius);
+    background: var(--border-hi);
+    border: 2px solid var(--bg);
+    box-shadow: 1px 1px 0px var(--bg);
     cursor: pointer;
   }
-  input[type="range"]::-webkit-slider-thumb:hover {
-    background: var(--mint);
-  }
+  input[type="range"]::-webkit-slider-thumb:hover { background: var(--mint); }
 
   .mini-btn {
     height: 26px;
     padding: 0 8px;
     border-radius: var(--radius);
-    border: 2px solid var(--border);
-    background: #000000;
+    border: var(--border-w) solid var(--border);
+    background: var(--bg);
     color: var(--text);
     font-family: var(--mono);
     font-size: 11px;
     font-weight: 700;
     cursor: pointer;
-    transition: border-color 0.1s, background 0.1s;
   }
-  .mini-btn:hover { border-color: #ffffff; background: var(--surface-3); }
+  .mini-btn:hover { border-color: var(--border-hi); background: var(--surface-3); }
   .mini-btn.active {
     background: var(--crimson);
     color: #ffffff;
-    border-color: #ffffff;
+    border-color: var(--border-hi);
   }
 
-  /* Footer & Diagnostics Drawer */
-  .footer {
-    background: var(--bg);
-    border-top: 2px solid var(--border);
-  }
-
+  /* Footer & Diagnostics */
+  .footer { background: var(--surface); border-top: var(--border-w) solid var(--border); }
   .diag-drawer {
     display: none;
-    padding: 12px 22px;
-    border-bottom: 2px solid var(--border);
-    background: var(--surface);
+    padding: 12px 20px;
+    border-bottom: var(--border-w) solid var(--border);
+    background: var(--bg);
   }
   .diag-drawer.open { display: block; }
-
   .diag-table {
     width: 100%;
     border-collapse: collapse;
@@ -517,31 +502,23 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     font-weight: 700;
     text-transform: uppercase;
     padding: 4px 8px;
-    border-bottom: 2px solid var(--border);
+    border-bottom: var(--border-w) solid var(--border);
   }
-  .diag-table td {
-    padding: 6px 8px;
-    color: var(--text);
-    border-bottom: 1px solid var(--border);
-  }
+  .diag-table td { padding: 6px 8px; color: var(--text); border-bottom: 1px solid var(--border); }
 
   .footer-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 22px;
+    padding: 9px 20px;
     font-size: 11.5px;
     color: var(--text-dim);
   }
-
-  .footer-stats {
-    font-family: var(--mono);
-    font-variant-numeric: tabular-nums;
-  }
-
+  .footer-stats { font-family: var(--mono); font-variant-numeric: tabular-nums; }
   .btn-link {
-    background: var(--surface);
-    border: 2px solid var(--border);
+    background: var(--surface-2);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
     padding: 3px 10px;
     color: var(--text);
     font-family: var(--mono);
@@ -550,10 +527,84 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     text-transform: uppercase;
     cursor: pointer;
   }
-  .btn-link:hover { border-color: #ffffff; }
+  .btn-link:hover { border-color: var(--border-hi); }
+
+  /* Cute First-Time Guide Modal */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.82);
+    z-index: 100;
+    place-items: center;
+    padding: 20px;
+  }
+  .modal-backdrop.open { display: grid; }
+  .modal {
+    width: 100%;
+    max-width: 540px;
+    background: var(--surface);
+    border: var(--border-w) solid var(--border-hi);
+    border-radius: var(--radius);
+    box-shadow: 6px 6px 0px var(--mint);
+    padding: 22px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .modal-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .modal-title {
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--text);
+  }
+  .modal-tagline {
+    font-size: 12.5px;
+    color: var(--mint);
+    font-weight: 600;
+    margin-top: 2px;
+  }
+  .guide-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .guide-step {
+    background: var(--bg);
+    border: var(--border-w) solid var(--border);
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+  }
+  .step-num {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    background: var(--mint);
+    color: var(--mint-ink);
+    font-family: var(--mono);
+    font-weight: 800;
+    font-size: 12px;
+    display: grid;
+    place-items: center;
+    border-radius: var(--radius);
+  }
+  .step-body h4 { font-size: 13px; font-weight: 700; color: var(--text); margin-bottom: 2px; }
+  .step-body p { font-size: 12px; color: var(--text-dim); line-height: 1.45; }
+  .modal-foot {
+    display: flex;
+    justify-content: flex-end;
+    padding-top: 4px;
+  }
 </style>
 </head>
-<body>
+<body data-theme="dark" data-style="brutalist">
 <div class="app">
   <header class="header">
     <div class="brand">
@@ -577,12 +628,26 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         <button class="seg-btn" data-mode="software">Static</button>
         <button class="seg-btn" data-mode="none">Direct</button>
       </div>
+
+      <select class="style-select" id="styleSelect" title="UI Style Preset">
+        <option value="brutalist">UI: Brutalist</option>
+        <option value="studio">UI: Studio</option>
+        <option value="minimal">UI: Minimal</option>
+      </select>
+
+      <button class="btn-icon" id="btnTheme" title="Toggle Dark / Light Mode">
+        <span id="themeIcon">&#9728;</span>
+      </button>
+
+      <button class="btn-icon" id="btnGuide" title="Quick Start Guide">?</button>
+
       <button class="btn-icon" id="btnRefresh" title="Refresh audio devices">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter">
           <polyline points="23 4 23 10 17 10"></polyline>
           <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
         </svg>
       </button>
+
       <button class="btn-primary" id="btnSyncToggle">
         <span id="btnSyncLabel">Start Sync</span>
       </button>
@@ -632,16 +697,58 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   </footer>
 </div>
 
+<!-- Cute & Friendly First-Time Welcome Guide -->
+<div class="modal-backdrop" id="guideModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <div class="modal-title">Welcome to SyncWave!</div>
+        <div class="modal-tagline">No more &ldquo;bro pause it, my Bluetooth is lagging&rdquo; &mdash; ever again.</div>
+      </div>
+      <button class="btn-icon" id="btnCloseGuide">&times;</button>
+    </div>
+    <div class="guide-steps">
+      <div class="guide-step">
+        <div class="step-num">1</div>
+        <div class="step-body">
+          <h4>Pick Your Squad&rsquo;s Gear</h4>
+          <p>Toggle ON the speakers &amp; earphones you want to play together. Every device starts at a chill <strong>50% hardware volume</strong> so nobody&rsquo;s eardrums get surprised, and we remember your exact levels next time!</p>
+        </div>
+      </div>
+      <div class="guide-step">
+        <div class="step-num">2</div>
+        <div class="step-body">
+          <h4>Tame the Bluetooth Time-Traveler</h4>
+          <p>Wireless earbuds take ~180&ndash;220 ms to fly sound through the air. Slide the <strong>Sync Delay</strong> on your wired laptop speakers up until both ears agree it&rsquo;s pure magic.</p>
+        </div>
+      </div>
+      <div class="guide-step">
+        <div class="step-num">3</div>
+        <div class="step-body">
+          <h4>Hit Start Sync &amp; Press Play Anywhere</h4>
+          <p>Play your movie in <strong>VLC</strong>, watch <strong>YouTube</strong>, or blast <strong>Spotify</strong>. SyncWave quietly handles Windows audio routing in the background and politely puts everything back when you stop or close!</p>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-primary" id="btnGuideDone">Let&rsquo;s Sync!</button>
+    </div>
+  </div>
+</div>
+
 <script>
   const PREFS_KEY = 'syncwave_prefs_v1';
+  const ONBOARD_KEY = 'syncwave_onboarded_v1';
 
   const state = {
     devices: [],
     enabledIds: new Set(),
-    volumes: {},   // id -> 0..100 (default 50 on first launch)
-    muted: {},     // id -> bool
-    delays: {},    // id -> 0..400 ms
+    volumes: {},
+    muted: {},
+    delays: {},
     syncMode: 'adaptive',
+    theme: 'dark',
+    uiStyle: 'brutalist',
     isRunning: false,
     telemetry: null,
     diagOpen: false
@@ -650,15 +757,20 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   function loadPrefs() {
     try {
       const raw = localStorage.getItem(PREFS_KEY);
-      return raw ? JSON.parse(raw) : { syncMode: 'adaptive', devices: {} };
+      return raw ? JSON.parse(raw) : { syncMode: 'adaptive', theme: 'dark', uiStyle: 'brutalist', devices: {} };
     } catch {
-      return { syncMode: 'adaptive', devices: {} };
+      return { syncMode: 'adaptive', theme: 'dark', uiStyle: 'brutalist', devices: {} };
     }
   }
 
   function savePrefs() {
     try {
-      const prefs = { syncMode: state.syncMode, devices: {} };
+      const prefs = {
+        syncMode: state.syncMode,
+        theme: state.theme,
+        uiStyle: state.uiStyle,
+        devices: {}
+      };
       state.devices.forEach(d => {
         prefs.devices[d.id] = {
           enabled: state.enabledIds.has(d.id),
@@ -675,6 +787,14 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.postMessage(obj);
     }
+  }
+
+  function applyAppearance() {
+    document.body.setAttribute('data-theme', state.theme);
+    document.body.setAttribute('data-style', state.uiStyle);
+    document.getElementById('styleSelect').value = state.uiStyle;
+    document.getElementById('themeIcon').innerHTML = state.theme === 'dark' ? '&#9728;' : '&#9790;';
+    post({ cmd: 'setTheme', mode: state.theme });
   }
 
   function getSelectedOrderedIds() {
@@ -699,7 +819,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   function sliderStyle(pct, colorVar) {
-    return `background: linear-gradient(to right, ${colorVar} 0%, ${colorVar} ${pct}%, #1e1e26 ${pct}%, #1e1e26 100%)`;
+    return `background: linear-gradient(to right, ${colorVar} 0%, ${colorVar} ${pct}%, var(--surface-3) ${pct}%, var(--surface-3) 100%)`;
   }
 
   function speakerSvg(isBt) {
@@ -791,7 +911,6 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       list.appendChild(card);
     });
 
-    // Wire events
     list.querySelectorAll('input[data-toggle]').forEach(el => {
       el.addEventListener('change', (e) => {
         const id = e.target.dataset.toggle;
@@ -930,7 +1049,6 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     `).join('');
   }
 
-  // Segmented sync mode
   document.querySelectorAll('.seg-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
@@ -940,6 +1058,28 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       savePrefs();
     });
   });
+
+  document.getElementById('styleSelect').addEventListener('change', (e) => {
+    state.uiStyle = e.target.value;
+    applyAppearance();
+    savePrefs();
+  });
+
+  document.getElementById('btnTheme').addEventListener('click', () => {
+    state.theme = state.theme === 'dark' ? 'light' : 'dark';
+    applyAppearance();
+    savePrefs();
+  });
+
+  function openGuide() { document.getElementById('guideModal').classList.add('open'); }
+  function closeGuide() {
+    document.getElementById('guideModal').classList.remove('open');
+    try { localStorage.setItem(ONBOARD_KEY, '1'); } catch {}
+  }
+
+  document.getElementById('btnGuide').addEventListener('click', openGuide);
+  document.getElementById('btnCloseGuide').addEventListener('click', closeGuide);
+  document.getElementById('btnGuideDone').addEventListener('click', closeGuide);
 
   document.getElementById('btnRefresh').addEventListener('click', () => {
     post({ cmd: 'refreshDevices' });
@@ -967,6 +1107,10 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       if (!msg) return;
       if (msg.type === 'devices') {
         const prefs = loadPrefs();
+        state.theme = prefs.theme || 'dark';
+        state.uiStyle = prefs.uiStyle || 'brutalist';
+        applyAppearance();
+
         if (prefs.syncMode) {
           state.syncMode = prefs.syncMode;
           document.querySelectorAll('.seg-btn').forEach(b => {
@@ -985,7 +1129,6 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
             state.muted[d.id] = !!saved.muted;
             state.delays[d.id] = typeof saved.delay === 'number' ? saved.delay : 0;
           } else {
-            // First time: auto-enable physical outputs, default volume to 50%
             if (!d.isVirtual) state.enabledIds.add(d.id);
             state.volumes[d.id] = 50;
             state.muted[d.id] = false;
@@ -995,6 +1138,12 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         savePrefs();
         renderDevices();
         applyAllEndpointVolumes();
+
+        try {
+          if (!localStorage.getItem(ONBOARD_KEY)) {
+            openGuide();
+          }
+        } catch {}
       } else if (msg.type === 'telemetry') {
         updateTelemetryUi(msg);
       } else if (msg.type === 'error') {

@@ -487,6 +487,10 @@ void MainWindow::onWebMessageReceived(const std::wstring& messageJson) {
     } else if (cmd == "setDelays") {
         auto delays = extractJsonNumberArray(json, "delays");
         engine_->setManualDelays(delays);
+    } else if (cmd == "setTheme") {
+        std::string mode = extractJsonString(json, "mode");
+        BOOL darkMode = (mode != "light") ? TRUE : FALSE;
+        DwmSetWindowAttribute(hWnd_, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &darkMode, sizeof(darkMode));
     }
 }
 

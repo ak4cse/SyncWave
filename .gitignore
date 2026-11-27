@@ -1,6 +1,7 @@
 build/
 bin/
 out/
+dist/
 .vs/
 *.user
 *.suo
