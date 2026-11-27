@@ -9,7 +9,7 @@ Unicode True
 Page directory
 Page instfiles
 
-UninstPage confirm
+UninstPage uninstConfirm
 UninstPage instfiles
 
 Section "SyncWave (required)"
