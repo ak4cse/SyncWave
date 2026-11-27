@@ -27,15 +27,25 @@ foreach ($dll in $RuntimeDlls) {
     Copy-Item $dll $StageDir -Force
 }
 
-$Makensis = "C:\msys64\ucrt64\bin\makensis.exe"
-if (-not (Test-Path $Makensis)) {
-    throw "makensis.exe not found at $Makensis. Install mingw-w64-ucrt-x86_64-nsis first."
+$IsccCandidates = @(
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 6\ISCC.exe",
+    (Join-Path $env:LOCALAPPDATA "Programs\Inno Setup 6\ISCC.exe")
+)
+
+$Iscc = $IsccCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $Iscc) {
+    $cmd = Get-Command iscc -ErrorAction SilentlyContinue
+    if ($cmd) { $Iscc = $cmd.Source }
+}
+if (-not $Iscc) {
+    throw "ISCC.exe (Inno Setup 6) not found. Install via: winget install JRSoftware.InnoSetup"
 }
 
-Write-Host "Building SyncWave-Setup-1.0.0.exe..."
-& $Makensis (Join-Path $PSScriptRoot "SyncWave.nsi")
+Write-Host "Building SyncWave-Setup-1.0.0.exe with Inno Setup ($Iscc)..."
+& $Iscc (Join-Path $PSScriptRoot "SyncWave.iss")
 if ($LASTEXITCODE -ne 0) {
-    throw "makensis failed with exit code $LASTEXITCODE"
+    throw "ISCC.exe failed with exit code $LASTEXITCODE"
 }
 
 Write-Host "Installer created: $(Join-Path $DistDir 'SyncWave-Setup-1.0.0.exe')"

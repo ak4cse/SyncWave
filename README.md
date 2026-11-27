@@ -38,7 +38,8 @@ On Windows, three things break immediately:
 ## Building from Source & Creating the Installer (Windows / MSYS2 UCRT64)
 
 ### Prerequisites
-- **MSYS2 UCRT64** (`cmake`, `ninja`, `g++` C++20, `mingw-w64-ucrt-x86_64-webview2-loader`, `mingw-w64-ucrt-x86_64-nsis`)
+- **MSYS2 UCRT64** (`cmake`, `ninja`, `g++` C++20, `mingw-w64-ucrt-x86_64-webview2-loader`)
+- **Inno Setup 6** (`winget install JRSoftware.InnoSetup`) for building the Windows installer
 - **Edge WebView2 Runtime** (pre-installed on Windows 10/11)
 - **VLC 64-bit** (`C:\Program Files\VideoLAN\VLC`) for LibVLC headers/DLLs
 
@@ -67,7 +68,7 @@ This stages `syncwave_gui.exe`, `syncwave.exe`, and all required runtime DLLs in
 - `src/core/` — `ISyncWaveEngine`, `SyncWaveEngineImpl`, `DiagnosticsSnapshot`
 - `src/gui/` — WebView2 native host (`MainWindow.h/.cpp`) & embedded UI (`StudioUiHtml.h`)
 - `src/app/` — CLI interface (`syncwave.exe`)
-- `installer/` — NSIS installer script (`SyncWave.nsi`) & packaging script (`build_installer.ps1`)
+- `installer/` — Inno Setup 6 script (`SyncWave.iss`) & packaging script (`build_installer.ps1`)
 - `tests/` — Automated unit & integration test suite (`syncwave_tests.exe`)
 
 ---
