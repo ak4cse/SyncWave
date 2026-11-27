@@ -1,8 +1,10 @@
 #include "ISyncWaveEngine.h"
 #include "../audio/AudioEngine.h"
 #include "../av/VlcMediaEngine.h"
+#include "../windows/DefaultAudioSwitcher.h"
 #include <windows.h>
 #include <psapi.h>
+#include <algorithm>
 #include <chrono>
 #include <mutex>
 
@@ -66,8 +68,95 @@ public:
 
         applySyncSettings();
 
+        std::vector<AudioDevice> outDevs;
+        for (const auto& id : outputIds) {
+            if (auto dev = deviceManager_->getDeviceById(id)) {
+                outDevs.push_back(*dev);
+            }
+        }
+        auto capDevOpt = deviceManager_->getDeviceById(captureSourceId);
+        if (!capDevOpt || outDevs.empty()) {
+            lastError_ = "Invalid capture source or output device selection.";
+            return false;
+        }
+
         activeSource_ = "LoopbackCapture";
-        return audioEngine_->startCapture(captureSourceId, outputIds);
+        if (!audioEngine_->startCapture(*capDevOpt, outDevs)) {
+            lastError_ = "Failed to start WASAPI loopback capture.";
+            activeSource_ = "None";
+            return false;
+        }
+        applyLiveVolumeAndDelay();
+        lastError_.clear();
+        applyLiveVolumeAndDelay();
+        return true;
+    }
+
+    bool startAutoSystemCapture(const std::vector<std::string>& outputIds) override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        stopInternal();
+
+        if (outputIds.empty()) {
+            lastError_ = "Please select at least one output device.";
+            return false;
+        }
+
+        auto activeDevs = deviceManager_->enumerateDevices(true);
+        std::optional<AudioDevice> captureDev;
+
+        // Prefer a virtual endpoint (e.g. Steam Streaming Speakers) not in outputIds
+        auto isSelected = [&](const std::string& id) {
+            return std::find(outputIds.begin(), outputIds.end(), id) != outputIds.end();
+        };
+
+        for (const auto& dev : activeDevs) {
+            if (!isSelected(dev.id) && dev.name.find("Steam Streaming Speakers") != std::string::npos) {
+                captureDev = dev;
+                break;
+            }
+        }
+        if (!captureDev) {
+            for (const auto& dev : activeDevs) {
+                if (!isSelected(dev.id)) {
+                    captureDev = dev;
+                    break;
+                }
+            }
+        }
+        if (!captureDev) {
+            lastError_ = "No separate unused playback endpoint found for loopback capture (to avoid feedback, uncheck at least one endpoint such as Steam Streaming Speakers).";
+            return false;
+        }
+
+        // Save current default playback device and auto-switch Windows default to captureDev
+        if (auto currentDef = deviceManager_->getDefaultDevice()) {
+            if (currentDef->id != captureDev->id) {
+                originalDefaultDeviceId_ = currentDef->id;
+                if (DefaultAudioSwitcher::setDefaultPlaybackDevice(captureDev->id)) {
+                    autoSwitchedDefault_ = true;
+                }
+            }
+        }
+
+        std::vector<AudioDevice> outDevs;
+        for (const auto& id : outputIds) {
+            if (auto dev = deviceManager_->getDeviceById(id)) {
+                outDevs.push_back(*dev);
+            }
+        }
+
+        applySyncSettings();
+        activeSource_ = "SystemAudioLoopback";
+        if (!audioEngine_->startCapture(*captureDev, outDevs)) {
+            lastError_ = "Failed to start WASAPI loopback capture on " + captureDev->name;
+            restoreDefaultDeviceIfNeeded();
+            activeSource_ = "None";
+            return false;
+        }
+        applyLiveVolumeAndDelay();
+        lastError_.clear();
+        applyLiveVolumeAndDelay();
+        return true;
     }
 
     bool startMedia(const std::string& filePathOrUrl, const std::vector<std::string>& outputIds) override {
@@ -113,7 +202,8 @@ public:
             return false;
         }
 
-        mediaEngine_ = std::make_unique<VlcMediaEngine>(audioEngine_->masterBus(), router);
+        mediaEngine_ = std::make_unique<VlcMediaEngine>(audioEngine_->masterBus(), router, videoHwnd_);
+        mediaEngine_->setAudioDelayMs(avSyncDelayMs_);
         if (!mediaEngine_->load(filePathOrUrl)) {
             lastError_ = mediaEngine_->lastError();
             router.stopOutputs();
@@ -133,6 +223,7 @@ public:
         }
 
         lastError_.clear();
+        applyLiveVolumeAndDelay();
         return true;
     }
 
@@ -173,12 +264,50 @@ public:
         std::lock_guard<std::mutex> lock(engineMutex_);
         manualDelays_ = delaysMs;
         audioEngine_->setManualDelays(delaysMs);
+        auto& router = audioEngine_->outputRouter();
+        for (size_t i = 0; i < delaysMs.size(); ++i) {
+            router.setDeviceDelayMs(i, delaysMs[i]);
+        }
     }
 
     void setCalibrationOffsets(const std::vector<double>& offsetsMs) override {
         std::lock_guard<std::mutex> lock(engineMutex_);
         calibrationOffsets_ = offsetsMs;
         audioEngine_->setCalibrationOffsets(offsetsMs);
+    }
+
+    void setDeviceVolume(size_t index, float volume) override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        if (index >= deviceVolumes_.size()) {
+            deviceVolumes_.resize(index + 1, 1.0f);
+        }
+        deviceVolumes_[index] = volume;
+        audioEngine_->outputRouter().setDeviceVolume(index, volume);
+    }
+
+    void setDeviceMuted(size_t index, bool muted) override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        if (index >= deviceMutes_.size()) {
+            deviceMutes_.resize(index + 1, false);
+        }
+        deviceMutes_[index] = muted;
+        audioEngine_->outputRouter().setDeviceMuted(index, muted);
+    }
+
+    void setVideoWindow(void* hwnd) override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        videoHwnd_ = hwnd;
+        if (mediaEngine_) {
+            mediaEngine_->setVideoWindow(hwnd);
+        }
+    }
+
+    void setAvSyncDelayMs(double delayMs) override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        avSyncDelayMs_ = delayMs;
+        if (mediaEngine_) {
+            mediaEngine_->setAudioDelayMs(delayMs);
+        }
     }
 
     bool isRunning() const override {
@@ -282,7 +411,29 @@ private:
             mediaEngine_.reset();
         }
         audioEngine_->stop();
+        restoreDefaultDeviceIfNeeded();
         activeSource_ = "None";
+    }
+
+    void restoreDefaultDeviceIfNeeded() {
+        if (autoSwitchedDefault_ && !originalDefaultDeviceId_.empty()) {
+            DefaultAudioSwitcher::setDefaultPlaybackDevice(originalDefaultDeviceId_);
+            autoSwitchedDefault_ = false;
+            originalDefaultDeviceId_.clear();
+        }
+    }
+
+    void applyLiveVolumeAndDelay() {
+        auto& router = audioEngine_->outputRouter();
+        for (size_t i = 0; i < manualDelays_.size(); ++i) {
+            router.setDeviceDelayMs(i, manualDelays_[i]);
+        }
+        for (size_t i = 0; i < deviceVolumes_.size(); ++i) {
+            router.setDeviceVolume(i, deviceVolumes_[i]);
+        }
+        for (size_t i = 0; i < deviceMutes_.size(); ++i) {
+            router.setDeviceMuted(i, deviceMutes_[i]);
+        }
     }
 
     void applySyncSettings() {
@@ -344,8 +495,14 @@ private:
     std::string activeSource_ = "None";
     std::string syncMode_ = "adaptive";
     std::string lastError_;
+    std::string originalDefaultDeviceId_;
+    bool autoSwitchedDefault_ = false;
+    void* videoHwnd_ = nullptr;
+    double avSyncDelayMs_ = 0.0;
     std::vector<double> manualDelays_;
     std::vector<double> calibrationOffsets_;
+    std::vector<float> deviceVolumes_;
+    std::vector<bool> deviceMutes_;
 
     std::chrono::steady_clock::time_point startTime_;
     FILETIME lastKernel_{}, lastUser_{};

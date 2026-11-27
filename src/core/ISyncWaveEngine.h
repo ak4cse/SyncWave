@@ -25,16 +25,21 @@ public:
     // --- Playback Control ---
     virtual bool startTone(const std::vector<std::string>& outputIds, double frequencyHz = 440.0, double volume = 0.25) = 0;
     virtual bool startCapture(const std::string& captureSourceId, const std::vector<std::string>& outputIds) = 0;
+    virtual bool startAutoSystemCapture(const std::vector<std::string>& outputIds) = 0;
     virtual bool startMedia(const std::string& filePathOrUrl, const std::vector<std::string>& outputIds) = 0;
     virtual void stop() = 0;
     virtual void pause() = 0;
     virtual void resume() = 0;
     virtual bool seekMedia(double targetTimeMs) = 0;
 
-    // --- Synchronization & Delay Configuration ---
+    // --- Synchronization, Volume & Video Configuration ---
     virtual void setSyncMode(const std::string& mode) = 0; // "none", "software", "adaptive"
     virtual void setManualDelays(const std::vector<double>& delaysMs) = 0;
     virtual void setCalibrationOffsets(const std::vector<double>& offsetsMs) = 0;
+    virtual void setDeviceVolume(size_t index, float volume) = 0;
+    virtual void setDeviceMuted(size_t index, bool muted) = 0;
+    virtual void setVideoWindow(void* hwnd) = 0;
+    virtual void setAvSyncDelayMs(double delayMs) = 0;
 
     // --- Diagnostics & State Query ---
     virtual bool isRunning() const = 0;

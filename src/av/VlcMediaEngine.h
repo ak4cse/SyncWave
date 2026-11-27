@@ -18,7 +18,7 @@ namespace syncwave {
 
 class VlcMediaEngine {
 public:
-    explicit VlcMediaEngine(MasterAudioBus& masterBus, OutputRouter& outputRouter);
+    explicit VlcMediaEngine(MasterAudioBus& masterBus, OutputRouter& outputRouter, void* videoHwnd = nullptr);
     ~VlcMediaEngine();
 
     VlcMediaEngine(const VlcMediaEngine&) = delete;
@@ -37,6 +37,10 @@ public:
     // Dynamic playback rate control (e.g. 1.0, 1.01)
     void setPlaybackRate(float rate);
     [[nodiscard]] float playbackRate() const;
+
+    // Embedded video surface and A/V lip-sync offset (negative = audio earlier than video)
+    void setVideoWindow(void* hwnd);
+    void setAudioDelayMs(double delayMs);
 
     // Current media playback state
     [[nodiscard]] double currentMediaTimeMs() const;
@@ -74,6 +78,8 @@ private:
     libvlc_media_t* currentMedia_ = nullptr;
 
     mutable std::mutex mutex_;
+    void* videoHwnd_ = nullptr;
+    double audioDelayMs_ = 0.0;
     std::string currentPath_;
     std::string lastError_;
     std::atomic<bool> isLoaded_{false};

@@ -3793,10 +3793,16 @@ void testGuiEngineContractIntegrationM15() {
     }
     TEST_ASSERT(!selectedIds.empty(), "Selected endpoint IDs populated for multi-output playback");
 
-    // 2. Sync mode transitions
+    // 2. Sync mode & live control transitions
     engine->setSyncMode("none");
     engine->setSyncMode("software");
     engine->setSyncMode("adaptive");
+    engine->setDeviceVolume(0, 0.85f);
+    engine->setDeviceMuted(0, false);
+    engine->setManualDelays({180.0, 0.0});
+    engine->setAvSyncDelayMs(-180.0);
+    engine->setManualDelays({0.0, 0.0});
+    engine->setAvSyncDelayMs(0.0);
 
     // 3. Invalid media load failure handling (GUI survival)
     bool invalidStart = engine->startMedia("nonexistent_video_path.mp4", selectedIds);

@@ -327,6 +327,20 @@ void OutputRouter::setDeviceCalibrationOffsetMs(size_t index, double offsetMs) {
     }
 }
 
+void OutputRouter::setDeviceVolume(size_t index, float volume) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    if (index < outputs_.size() && outputs_[index]) {
+        outputs_[index]->setVolume(volume);
+    }
+}
+
+void OutputRouter::setDeviceMuted(size_t index, bool muted) {
+    std::lock_guard<std::mutex> lock(outputMutex_);
+    if (index < outputs_.size() && outputs_[index]) {
+        outputs_[index]->setMuted(muted);
+    }
+}
+
 void OutputRouter::setSyncStateAll(SyncState state) {
     std::lock_guard<std::mutex> lock(outputMutex_);
     for (auto& out : outputs_) {

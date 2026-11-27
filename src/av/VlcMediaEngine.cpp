@@ -60,10 +60,11 @@ void vlcAudioCleanupCallback(void* /*data*/) {
 
 } // namespace
 
-VlcMediaEngine::VlcMediaEngine(MasterAudioBus& masterBus, OutputRouter& outputRouter)
+VlcMediaEngine::VlcMediaEngine(MasterAudioBus& masterBus, OutputRouter& outputRouter, void* videoHwnd)
     : masterBus_(masterBus),
       outputRouter_(outputRouter),
-      timeline_(masterBus.format().sampleRate)
+      timeline_(masterBus.format().sampleRate),
+      videoHwnd_(videoHwnd)
 {
     initLibVlc();
 }
@@ -95,14 +96,15 @@ void VlcMediaEngine::initLibVlc() {
         }
     }
 
-    const char* const vlcArgs[] = {
-        "--no-video",
-        "--no-video-title-show",
-        "--no-spdif",
-        "--aout=amem" // Memory audio output plugin
-    };
+    std::vector<const char*> vlcArgs;
+    if (!videoHwnd_) {
+        vlcArgs.push_back("--no-video");
+    }
+    vlcArgs.push_back("--no-video-title-show");
+    vlcArgs.push_back("--no-spdif");
+    vlcArgs.push_back("--aout=amem"); // Memory audio output plugin
 
-    vlcInstance_ = libvlc_new(sizeof(vlcArgs) / sizeof(vlcArgs[0]), vlcArgs);
+    vlcInstance_ = libvlc_new(static_cast<int>(vlcArgs.size()), vlcArgs.data());
     if (!vlcInstance_) {
         // Fallback without extra arguments
         vlcInstance_ = libvlc_new(0, nullptr);
@@ -203,6 +205,13 @@ bool VlcMediaEngine::load(const std::string& filePathOrUrl) {
         vlcAudioCleanupCallback
     );
 
+    if (videoHwnd_) {
+        libvlc_media_player_set_hwnd(mediaPlayer_, videoHwnd_);
+    }
+    if (audioDelayMs_ != 0.0) {
+        libvlc_audio_set_delay(mediaPlayer_, static_cast<int64_t>(audioDelayMs_ * 1000.0));
+    }
+
     isLoaded_.store(true, std::memory_order_release);
     return true;
 }
@@ -276,6 +285,22 @@ void VlcMediaEngine::setPlaybackRate(float rate) {
 float VlcMediaEngine::playbackRate() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return mediaPlayer_ ? libvlc_media_player_get_rate(mediaPlayer_) : 1.0f;
+}
+
+void VlcMediaEngine::setVideoWindow(void* hwnd) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    videoHwnd_ = hwnd;
+    if (mediaPlayer_ && videoHwnd_) {
+        libvlc_media_player_set_hwnd(mediaPlayer_, videoHwnd_);
+    }
+}
+
+void VlcMediaEngine::setAudioDelayMs(double delayMs) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    audioDelayMs_ = delayMs;
+    if (mediaPlayer_) {
+        libvlc_audio_set_delay(mediaPlayer_, static_cast<int64_t>(delayMs * 1000.0));
+    }
 }
 
 double VlcMediaEngine::currentMediaTimeMs() const {

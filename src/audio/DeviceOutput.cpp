@@ -127,6 +127,14 @@ bool DeviceOutput::start() {
         } else {
             std::memcpy(dest, intermediate, frameCount * channels * sizeof(float));
         }
+
+        const float gain = muted_.load(std::memory_order_relaxed) ? 0.0f : volume_.load(std::memory_order_relaxed);
+        if (gain != 1.0f) {
+            const size_t totalSamples = static_cast<size_t>(frameCount) * channels;
+            for (size_t i = 0; i < totalSamples; ++i) {
+                dest[i] *= gain;
+            }
+        }
     });
 
     return started;
@@ -363,6 +371,24 @@ void DeviceOutput::setDelayFrames(size_t frames) {
         delayBuffer_->setDelayFrames(frames);
         syncState_.store(SyncState::Manual, std::memory_order_relaxed);
     }
+}
+
+void DeviceOutput::setVolume(float volume) {
+    if (volume < 0.0f) volume = 0.0f;
+    if (volume > 2.0f) volume = 2.0f;
+    volume_.store(volume, std::memory_order_relaxed);
+}
+
+float DeviceOutput::volume() const {
+    return volume_.load(std::memory_order_relaxed);
+}
+
+void DeviceOutput::setMuted(bool muted) {
+    muted_.store(muted, std::memory_order_relaxed);
+}
+
+bool DeviceOutput::isMuted() const {
+    return muted_.load(std::memory_order_relaxed);
 }
 
 double DeviceOutput::configuredDelayMs() const {

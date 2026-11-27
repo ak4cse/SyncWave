@@ -81,6 +81,8 @@ public:
     void setDeviceDelayMs(size_t index, double delayMs);
     void setDeviceDelayFrames(size_t index, size_t frames);
     void setDeviceCalibrationOffsetMs(size_t index, double offsetMs);
+    void setDeviceVolume(size_t index, float volume);
+    void setDeviceMuted(size_t index, bool muted);
     void setSyncStateAll(SyncState state);
     void applySyncPlan(const SyncPlan& plan);
 

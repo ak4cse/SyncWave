@@ -156,6 +156,12 @@ public:
     [[nodiscard]] DelayBuffer* delayBuffer() { return delayBuffer_.get(); }
     [[nodiscard]] const DelayBuffer* delayBuffer() const { return delayBuffer_.get(); }
 
+    // Per-device volume & mute controls (real-time safe, lock-free)
+    void setVolume(float volume);
+    [[nodiscard]] float volume() const;
+    void setMuted(bool muted);
+    [[nodiscard]] bool isMuted() const;
+
     [[nodiscard]] DeviceOutputTelemetry getTelemetry() const;
 
 private:
@@ -187,6 +193,8 @@ private:
     std::atomic<uint64_t> queueUnderruns_{0};
     std::atomic<uint64_t> queueOverruns_{0};
     std::atomic<bool> isAvailable_{true};
+    std::atomic<float> volume_{1.0f};
+    std::atomic<bool> muted_{false};
 };
 
 } // namespace syncwave
