@@ -44,6 +44,7 @@ public:
     [[nodiscard]] std::string stateString() const;
     [[nodiscard]] bool isPlaying() const;
     [[nodiscard]] bool isPaused() const;
+    [[nodiscard]] std::string lastError() const;
 
     // Current A/V synchronization state query
     [[nodiscard]] AVSyncState getSyncState() const;
@@ -74,6 +75,7 @@ private:
 
     mutable std::mutex mutex_;
     std::string currentPath_;
+    std::string lastError_;
     std::atomic<bool> isLoaded_{false};
     std::atomic<bool> isPlaying_{false};
     std::atomic<bool> isPaused_{false};

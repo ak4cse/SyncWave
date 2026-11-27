@@ -2569,6 +2569,9 @@ int CommandInterface::handleMediaCommand(const std::vector<std::string>& args) {
     VlcMediaEngine mediaEngine(audioEngine_->masterBus(), router);
     if (!mediaEngine.load(mediaPath)) {
         std::cerr << "Error: Failed to load media file into VLC engine: " << mediaPath << "\n";
+        if (!mediaEngine.lastError().empty()) {
+            std::cerr << "       " << mediaEngine.lastError() << "\n";
+        }
         router.stopOutputs();
         router.closeOutputs();
         return 1;
@@ -2584,6 +2587,9 @@ int CommandInterface::handleMediaCommand(const std::vector<std::string>& args) {
 
     if (!mediaEngine.play()) {
         std::cerr << "Error: Failed to start VLC media playback.\n";
+        if (!mediaEngine.lastError().empty()) {
+            std::cerr << "       " << mediaEngine.lastError() << "\n";
+        }
         router.stopOutputs();
         router.closeOutputs();
         SetConsoleCtrlHandler(consoleCtrlHandler, FALSE);

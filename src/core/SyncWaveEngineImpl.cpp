@@ -94,13 +94,23 @@ public:
 
         mediaEngine_ = std::make_unique<VlcMediaEngine>(audioEngine_->masterBus(), router);
         if (!mediaEngine_->load(filePathOrUrl)) {
+            lastError_ = mediaEngine_->lastError();
             router.stopOutputs();
             router.closeOutputs();
             mediaEngine_.reset();
             return false;
         }
 
-        return mediaEngine_->play();
+        if (!mediaEngine_->play()) {
+            lastError_ = mediaEngine_->lastError();
+            router.stopOutputs();
+            router.closeOutputs();
+            mediaEngine_.reset();
+            return false;
+        }
+
+        lastError_.clear();
+        return true;
     }
 
     void stop() override {
@@ -231,6 +241,17 @@ public:
         return snap;
     }
 
+    std::string getLastError() const override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        if (!lastError_.empty()) {
+            return lastError_;
+        }
+        if (mediaEngine_) {
+            return mediaEngine_->lastError();
+        }
+        return {};
+    }
+
 private:
     void stopInternal() {
         if (mediaEngine_) {
@@ -292,13 +313,14 @@ private:
         }
     }
 
-    std::mutex engineMutex_;
+    mutable std::mutex engineMutex_;
     std::unique_ptr<DeviceManager> deviceManager_;
     std::unique_ptr<AudioEngine> audioEngine_;
     std::unique_ptr<VlcMediaEngine> mediaEngine_;
 
     std::string activeSource_ = "None";
     std::string syncMode_ = "adaptive";
+    std::string lastError_;
     std::vector<double> manualDelays_;
     std::vector<double> calibrationOffsets_;
 

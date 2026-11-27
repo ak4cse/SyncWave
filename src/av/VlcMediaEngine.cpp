@@ -1,7 +1,10 @@
 #include "VlcMediaEngine.h"
+#include "../windows/ComHelper.h"
 #include <vlc/vlc.h>
 #include <iostream>
 #include <filesystem>
+#include <vector>
+#include <cstring>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -41,6 +44,20 @@ void vlcAudioDrainCallback(void* data) {
     }
 }
 
+int vlcAudioSetupCallback(void** data, char* format, unsigned* rate, unsigned* channels) {
+    if (!data || !*data) return -1;
+    // We negotiate S16N (Signed 16-bit Native PCM), 48000 Hz, stereo.
+    // LibVLC will decode/downmix any input format (e.g. E-AC-3, AC-3, DTS, AAC, FLAC, Vorbis, MP3)
+    // to 2-channel 48000 Hz 16-bit PCM.
+    std::memcpy(format, "S16N", 4);
+    *channels = 2;
+    *rate = 48000;
+    return 0;
+}
+
+void vlcAudioCleanupCallback(void* /*data*/) {
+}
+
 } // namespace
 
 VlcMediaEngine::VlcMediaEngine(MasterAudioBus& masterBus, OutputRouter& outputRouter)
@@ -69,6 +86,7 @@ void VlcMediaEngine::initLibVlc() {
     const char* const vlcArgs[] = {
         "--no-video",
         "--no-video-title-show",
+        "--no-spdif",
         "--aout=amem" // Memory audio output plugin
     };
 
@@ -98,7 +116,11 @@ void VlcMediaEngine::cleanupLibVlc() {
 
 bool VlcMediaEngine::load(const std::string& filePathOrUrl) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!vlcInstance_) return false;
+    lastError_.clear();
+    if (!vlcInstance_) {
+        lastError_ = "VLC engine instance is not initialized.";
+        return false;
+    }
 
     if (mediaPlayer_) {
         libvlc_media_player_stop(mediaPlayer_);
@@ -110,27 +132,40 @@ bool VlcMediaEngine::load(const std::string& filePathOrUrl) {
         currentMedia_ = nullptr;
     }
 
-    currentPath_ = filePathOrUrl;
-    bool isUrl = (filePathOrUrl.find("://") != std::string::npos);
-    if (!isUrl && !std::filesystem::exists(filePathOrUrl)) {
+    if (filePathOrUrl.empty()) {
+        lastError_ = "Media path is empty.";
         return false;
     }
 
-    if (!isUrl && std::filesystem::exists(filePathOrUrl)) {
-        std::string absPath = std::filesystem::absolute(filePathOrUrl).string();
-        currentMedia_ = libvlc_media_new_path(vlcInstance_, absPath.c_str());
+    currentPath_ = filePathOrUrl;
+    bool isUrl = (filePathOrUrl.find("://") != std::string::npos);
+    if (!isUrl) {
+        std::filesystem::path fsPath(utf8ToWide(filePathOrUrl));
+        if (!std::filesystem::exists(fsPath)) {
+            lastError_ = "Local media file not found: " + filePathOrUrl;
+            return false;
+        }
+        std::filesystem::path absPath = std::filesystem::absolute(fsPath);
+        std::string absPathUtf8 = wideToUtf8(absPath.wstring());
+        currentMedia_ = libvlc_media_new_path(vlcInstance_, absPathUtf8.c_str());
     } else {
         currentMedia_ = libvlc_media_new_location(vlcInstance_, filePathOrUrl.c_str());
     }
 
-    if (!currentMedia_) return false;
+    if (!currentMedia_) {
+        const char* err = libvlc_errmsg();
+        lastError_ = "Failed to create VLC media from: " + filePathOrUrl + 
+                     (err ? " (" + std::string(err) + ")" : "");
+        return false;
+    }
 
     mediaPlayer_ = libvlc_media_player_new_from_media(currentMedia_);
-    if (!mediaPlayer_) return false;
-
-    // Configure memory audio output format matching MasterAudioBus canonical format (Float32, 48000Hz, stereo)
-    uint32_t sRate = masterBus_.format().sampleRate > 0 ? masterBus_.format().sampleRate : 48000;
-    libvlc_audio_set_format(mediaPlayer_, "FL32", sRate, 2);
+    if (!mediaPlayer_) {
+        const char* err = libvlc_errmsg();
+        lastError_ = "Failed to create VLC media player: " + 
+                     (err ? std::string(err) : "unknown error");
+        return false;
+    }
 
     // Register real-time audio callbacks
     libvlc_audio_set_callbacks(
@@ -143,20 +178,35 @@ bool VlcMediaEngine::load(const std::string& filePathOrUrl) {
         this
     );
 
+    // Register format negotiation callbacks for multi-format decoding (E-AC-3, AC-3, AAC, etc.)
+    libvlc_audio_set_format_callbacks(
+        mediaPlayer_,
+        vlcAudioSetupCallback,
+        vlcAudioCleanupCallback
+    );
+
     isLoaded_.store(true, std::memory_order_release);
     return true;
 }
 
 bool VlcMediaEngine::play() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!mediaPlayer_) return false;
+    if (!mediaPlayer_) {
+        lastError_ = "No media loaded to play.";
+        return false;
+    }
 
     int res = libvlc_media_player_play(mediaPlayer_);
     if (res == 0) {
         isPlaying_.store(true, std::memory_order_release);
         isPaused_.store(false, std::memory_order_release);
+        lastError_.clear();
         return true;
     }
+
+    const char* err = libvlc_errmsg();
+    lastError_ = "Failed to start VLC media playback: " + 
+                 (err ? std::string(err) : "unknown error");
     return false;
 }
 
@@ -249,6 +299,11 @@ bool VlcMediaEngine::isPaused() const {
     return isPaused_.load(std::memory_order_acquire);
 }
 
+std::string VlcMediaEngine::lastError() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return lastError_;
+}
+
 void VlcMediaEngine::resetAudioState() {
     masterBus_.reset();
     timeline_.reset();
@@ -290,8 +345,21 @@ void VlcMediaEngine::handleAudioPlay(const void* samples, unsigned int count, in
     lastAudioPts_.store(pts, std::memory_order_relaxed);
     totalAudioFramesIngested_.fetch_add(count, std::memory_order_relaxed);
 
-    const float* floatSamples = static_cast<const float*>(samples);
-    masterBus_.write(floatSamples, count);
+    // Convert S16N (int16_t) stereo samples to Float32 [-1.0f, +1.0f] for MasterAudioBus
+    const int16_t* pcm16 = static_cast<const int16_t*>(samples);
+    size_t totalSamples = static_cast<size_t>(count) * 2;
+
+    thread_local std::vector<float> conversionBuffer;
+    if (conversionBuffer.size() < totalSamples) {
+        conversionBuffer.resize(totalSamples);
+    }
+
+    constexpr float kNorm16 = 1.0f / 32768.0f;
+    for (size_t i = 0; i < totalSamples; ++i) {
+        conversionBuffer[i] = static_cast<float>(pcm16[i]) * kNorm16;
+    }
+
+    masterBus_.write(conversionBuffer.data(), count);
     outputRouter_.dispatch(masterBus_);
 }
 

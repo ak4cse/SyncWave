@@ -3709,6 +3709,11 @@ void testVlcMediaEngineLifecycleAndControlsM13() {
     TEST_ASSERT(!engine.isPaused(), "Initially not paused");
     TEST_ASSERT(engine.stateString() == "Stopped", "Initial state string is Stopped");
 
+    // Verify error reporting on non-existent file
+    bool badLoad = engine.load("non_existent_file_path_12345.mkv");
+    TEST_ASSERT(!badLoad, "Loading non-existent file returns false");
+    TEST_ASSERT(!engine.lastError().empty(), "lastError() is populated for non-existent file");
+
     // Load generated test MP4
     bool loaded = engine.load("test_av.mp4");
     TEST_ASSERT(loaded, "Successfully loaded test_av.mp4 into VlcMediaEngine");
@@ -3763,6 +3768,9 @@ void testSyncWavePublicEngineApiM14() {
     // Mode configuration
     engine->setSyncMode("software");
     engine->setSyncMode("adaptive");
+
+    // Last error query on idle engine
+    TEST_ASSERT(engine->getLastError().empty(), "Initially no last error on fresh engine");
 
     // Graceful stop on already stopped engine
     engine->stop();

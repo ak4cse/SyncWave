@@ -39,6 +39,7 @@ public:
     // --- Diagnostics & State Query ---
     virtual bool isRunning() const = 0;
     virtual FullDiagnosticsSnapshot getDiagnostics() = 0;
+    virtual std::string getLastError() const = 0;
 };
 
 // Factory function to create engine instance

@@ -6,6 +6,7 @@
 #endif
 
 #include "MainWindow.h"
+#include "../windows/ComHelper.h"
 #include <commctrl.h>
 #include <commdlg.h>
 #include <sstream>
@@ -379,8 +380,7 @@ void MainWindow::onOpenFileClicked() {
     ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 
     if (GetOpenFileNameW(&ofn)) {
-        std::wstring ws(szFile);
-        currentMediaPath_ = std::string(ws.begin(), ws.end());
+        currentMediaPath_ = wideToUtf8(szFile);
         SetWindowTextW(hLblMediaPath_, szFile);
         SendMessageW(hStatusBar_, SB_SETTEXTW, 0, (LPARAM)L"Loaded media file. Click Play to start synchronized playback.");
     }
@@ -419,8 +419,12 @@ void MainWindow::onPlayClicked() {
 
     bool ok = engine_->startMedia(currentMediaPath_, selectedDeviceIds_);
     if (!ok) {
-        MessageBoxW(hWnd_, L"Unable to start playback. Check the selected devices and media file.", L"Playback Error", MB_ICONERROR);
-        SendMessageW(hStatusBar_, SB_SETTEXTW, 0, (LPARAM)L"Error: Playback failed to start.");
+        std::string err = engine_->getLastError();
+        std::wstring wErr = err.empty() ? L"Unable to start playback. Check the selected devices and media file."
+                                        : utf8ToWide("Playback Error: " + err);
+        MessageBoxW(hWnd_, wErr.c_str(), L"Playback Error", MB_ICONERROR);
+        std::wstring statusMsg = utf8ToWide("Error: " + (err.empty() ? "Playback failed to start." : err));
+        SendMessageW(hStatusBar_, SB_SETTEXTW, 0, (LPARAM)statusMsg.c_str());
     } else {
         SendMessageW(hStatusBar_, SB_SETTEXTW, 0, (LPARAM)L"Synchronized playback running across selected outputs.");
     }
