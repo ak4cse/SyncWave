@@ -1,47 +1,67 @@
-# SyncWave
+<p align="center">
+  <img src="assets/syncwave-icon-512.png" width="112" alt="SyncWave Logo" />
+</p>
 
-**Synchronized multi-device audio routing for Windows.**  
-Play movies in VLC, stream YouTube, or listen to Spotify across wired speakers and multiple Bluetooth headphones at the exact same time — in sync, with independent hardware volume per listener.
+<h1 align="center">SyncWave</h1>
+
+<p align="center">
+  <strong>Synchronized multi-device audio routing for Windows 10 &amp; 11.</strong><br/>
+  Watch movies in VLC, stream YouTube, or listen to Spotify across wired speakers and multiple Bluetooth earphones at the exact same time &mdash; in sync, with independent hardware volume per listener.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Platform-Windows%2010%20%2F%2011%20(x64)-0078D6?style=flat-square" alt="Windows" />
+  <img src="https://img.shields.io/badge/Engine-C%2B%2B20%20%7C%20WASAPI-00E599?style=flat-square" alt="C++20 WASAPI" />
+  <img src="https://img.shields.io/badge/UI-Edge%20WebView2-7C3AED?style=flat-square" alt="WebView2" />
+</p>
+
+---
+
+## Download & Install (Windows)
+
+1. Go to the **[Releases](https://github.com/ak4cse/SyncWave/releases)** page and download **`SyncWave-Setup-1.0.0.exe`**.
+2. Double-click **`SyncWave-Setup-1.0.0.exe`** to install SyncWave.
+   - *If Windows SmartScreen appears (because the binary is self-published), click **More info** &rarr; **Run anyway**.*
+3. Launch **SyncWave** from your **Desktop** shortcut or **Windows Start Menu**.
+
+> **No manual Windows Sound setup required:** SyncWave automatically routes your system audio when you click **Start Sync** and restores your normal default speaker/headphones when you click **Stop** or close the app.
 
 ---
 
 ## Why SyncWave?
 
 ### The Problem
-Ever tried watching a movie or video on a laptop with a friend where one person wants Bluetooth earphones and the other uses wired speakers (or a second pair of headphones)?
-
-On Windows, three things break immediately:
-1. **Single-output limitation**: Windows only routes audio to one default playback device at a time.
-2. **Bluetooth latency & echo**: Even with virtual audio cables, Bluetooth A2DP headphones have ~150–250 ms of wireless transport and DSP buffering delay compared to wired speakers — creating an unbearable echo.
-3. **Clock drift & shared volume**: Independent audio hardware crystals drift apart over a 2-hour movie, and Windows has no clean way for each person to control their own hardware volume comfortably.
+Trying to watch a movie or video on one laptop with friends — where one person uses wired speakers or headphones and another uses Bluetooth earbuds — breaks on Windows out of the box:
+1. **Single-output limit**: Windows only sends audio to one default playback device at a time.
+2. **Bluetooth echo & lag**: Even with virtual audio cables, Bluetooth A2DP earbuds have ~150–250 ms of wireless transport and DSP delay compared to wired speakers, causing an unbearable echo.
+3. **Clock drift & shared volume**: Separate audio hardware clocks drift out of sync over a 2-hour movie, and Windows gives no simple way for each listener to set their own comfortable hardware volume.
 
 ### Our Solution
-**SyncWave** solves this with a real-time C++20 WASAPI audio engine and a lightweight WebView2 desktop UI:
-- **Zero-setup System Audio Capture**: Click **Start Sync** and SyncWave automatically switches Windows' default playback device to a loopback carrier, captures all system/browser/VLC audio, and automatically restores your original default device when you click **Stop** or close the app.
-- **Per-Device Hardware Volume (`0%–100%`)**: Uses Windows Core Audio `IAudioEndpointVolume` so each listener controls their own true hardware master volume (defaulting to a safe 50% on first launch and remembering your levels automatically).
-- **Per-Device Live Sync Delay (`0–400 ms`)**: Uses a lock-free circular `DelayBuffer` so wired speakers can be delayed smoothly in real time to lock with Bluetooth headphones.
-- **Closed-Loop Clock Drift Correction**: Continuously estimates each endpoint's hardware clock rate (`DeviceClock` + `FilteredDriftEstimator`) and applies slew-limited sinc micro-resampling (`±100 ppm`) so devices stay locked over long movies.
-- **Customizable Studio UI**: Choose between **Brutalist**, **Studio**, or **Minimal** UI styles in **AMOLED Dark** or **Crisp Light** mode, with a built-in quick-start guide and an optional collapsible diagnostics drawer.
+**SyncWave** combines a real-time C++20 WASAPI audio engine with a modern WebView2 desktop app:
+- **One-Click System Audio Sync**: Automatically switches Windows' default playback device to a loopback carrier on **Start Sync**, captures everything playing on your PC (VLC, Chrome, YouTube, Netflix, Spotify), and automatically restores your original default device on **Stop** or exit.
+- **Independent Hardware Volume (`0%–100%`)**: Controls each device's true Windows `IAudioEndpointVolume` master level independently of system sound (defaults to a safe **50%** on first launch and remembers your exact levels next time).
+- **Live Per-Device Sync Delay (`0–400 ms`)**: Lock-free circular `DelayBuffer` lets you delay wired speakers smoothly in real time until they lock with Bluetooth earphones.
+- **Closed-Loop Clock Drift Correction**: Continuously estimates each hardware clock (`DeviceClock` + `FilteredDriftEstimator`) and applies slew-limited sinc micro-resampling (`±100 ppm`) so outputs stay locked for hours.
+- **Customizable Studio UI**: Switch between **Brutalist**, **Studio**, or **Minimal** UI styles in **AMOLED Dark** or **Crisp Light** mode, with a friendly built-in quick-start guide and an optional collapsible diagnostics drawer.
 
 ---
 
-## Quick Start (Users)
+## How to Use
 
-1. Run the Windows installer **`SyncWave-Setup-1.0.0.exe`** (installs to `Program Files\SyncWave`, adds a Desktop shortcut, and registers SyncWave in your Start Menu / Apps list).
-2. Open **SyncWave** and toggle **ON** the speakers/headphones you want to sync.
-3. Click **Start Sync**, then play your movie in **VLC**, **Chrome**, **YouTube**, or **Spotify**.
-4. Adjust each device's **Master Volume** and **Sync Delay** sliders live until everything sounds locked.
-   - *Watching in external VLC?* If Bluetooth latency puts audio behind video on screen, SyncWave shows the exact `J` hotkey offset (e.g. `-200 ms`) to align VLC's video lip-sync.
+1. **Turn ON everyone's speakers or earbuds** in SyncWave (each starts at 50% hardware volume).
+2. **Click `Start Sync`** and play your movie or music in **VLC**, **YouTube**, **Netflix**, or **Spotify**.
+3. **Hear an echo?** Slowly slide **Sync Delay** up on the *wired speaker* until both ears lock together.
+   - *Watching in external VLC?* Press **`J`** in VLC to shift audio ahead by the recommended offset shown in SyncWave so mouths on screen match the audio.
 
 ---
 
-## Building from Source & Creating the Installer (Windows / MSYS2 UCRT64)
+## Building from Source & Creating the Installer
 
-### Prerequisites
+### Prerequisites (Windows x64)
 - **MSYS2 UCRT64** (`cmake`, `ninja`, `g++` C++20, `mingw-w64-ucrt-x86_64-webview2-loader`)
-- **Inno Setup 6** (`winget install JRSoftware.InnoSetup`) for building the Windows installer
+- **Inno Setup 6** (`winget install JRSoftware.InnoSetup`)
 - **Edge WebView2 Runtime** (pre-installed on Windows 10/11)
-- **VLC 64-bit** (`C:\Program Files\VideoLAN\VLC`) for LibVLC headers/DLLs
+- **VLC 64-bit** (`C:\Program Files\VideoLAN\VLC`)
 
 ### Build & Run Tests
 ```powershell
@@ -51,22 +71,23 @@ cmake --build build --config Release
 .\build\syncwave_tests.exe
 ```
 
-### Build Single-File Windows Installer (`SyncWave-Setup-1.0.0.exe`)
+### Build Windows Installer (`SyncWave-Setup-1.0.0.exe`)
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\installer\build_installer.ps1
 ```
-This stages `syncwave_gui.exe`, `syncwave.exe`, and all required runtime DLLs into `dist\stage\` and compiles `dist\SyncWave-Setup-1.0.0.exe` with Desktop + Start Menu shortcuts and a Windows uninstaller.
+Outputs `dist\SyncWave-Setup-1.0.0.exe` with all runtime DLLs, Desktop/Start Menu shortcuts, app icon, and a clean Windows uninstaller.
 
 ---
 
 ## Project Structure
+- `assets/` — Brand logo (`syncwave.ico`, `syncwave-icon.svg`, `syncwave-icon-512.png`, `syncwave-icon-1024.png`)
 - `src/audio/` — `MasterAudioBus`, `OutputRouter`, `DeviceOutput`, `AudioEngine`, `RingBuffer`
 - `src/sync/` — `DeviceClock`, `FilteredDriftEstimator`, `SyncController`, `DelayBuffer`, `AcousticCalibrator`
 - `src/dsp/` — `Resampler`, `ChirpGenerator`, `CorrelationDetector`
 - `src/windows/` — `DeviceManager`, `WasapiOutput`, `WasapiCapture`, `DefaultAudioSwitcher`, `EndpointVolumeController`
 - `src/av/` — `VlcMediaEngine`, `TimelineModel`
 - `src/core/` — `ISyncWaveEngine`, `SyncWaveEngineImpl`, `DiagnosticsSnapshot`
-- `src/gui/` — WebView2 native host (`MainWindow.h/.cpp`) & embedded UI (`StudioUiHtml.h`)
+- `src/gui/` — WebView2 native host (`MainWindow.h/.cpp`), embedded UI (`StudioUiHtml.h`), Windows icon resource (`app.rc`)
 - `src/app/` — CLI interface (`syncwave.exe`)
 - `installer/` — Inno Setup 6 script (`SyncWave.iss`) & packaging script (`build_installer.ps1`)
 - `tests/` — Automated unit & integration test suite (`syncwave_tests.exe`)

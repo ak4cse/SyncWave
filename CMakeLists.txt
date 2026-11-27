@@ -141,6 +141,7 @@ add_executable(syncwave_gui WIN32
     src/gui/MainWindow.h
     src/gui/MainWindow.cpp
     src/gui/StudioUiHtml.h
+    src/gui/app.rc
 )
 
 target_include_directories(syncwave_gui PRIVATE

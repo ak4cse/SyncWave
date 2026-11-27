@@ -261,7 +261,7 @@ bool MainWindow::create(int nCmdShow) {
     wc.lpszClassName = CLASS_NAME;
     wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(hInstance_, MAKEINTRESOURCEW(1));
     RegisterClassW(&wc);
 
     DWORD style = WS_OVERLAPPEDWINDOW;

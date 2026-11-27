@@ -118,15 +118,11 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .brand-mark {
-    width: 34px;
-    height: 34px;
-    border-radius: var(--radius);
-    background: var(--mint);
-    color: var(--mint-ink);
-    border: var(--border-w) solid var(--border-hi);
-    box-shadow: var(--shadow-btn);
+    width: 36px;
+    height: 36px;
     display: grid;
     place-items: center;
+    flex-shrink: 0;
   }
 
   .brand-title { display: flex; flex-direction: column; gap: 2px; }
@@ -609,8 +605,26 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   <header class="header">
     <div class="brand">
       <div class="brand-mark">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square" stroke-linejoin="miter">
-          <path d="M2 12h3l2.5-6 4 12 3.5-8 2.5 2H22"/>
+        <svg width="36" height="36" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="swFrame" x1="120" y1="130" x2="900" y2="900" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#13C8FF"/><stop offset="0.52" stop-color="#2867FF"/><stop offset="1" stop-color="#B23BFF"/>
+            </linearGradient>
+            <linearGradient id="swWave" x1="300" y1="300" x2="740" y2="730" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#20D8FF"/><stop offset="0.48" stop-color="#286BFF"/><stop offset="1" stop-color="#B33CFF"/>
+            </linearGradient>
+            <linearGradient id="swBars" x1="180" y1="0" x2="844" y2="0" gradientUnits="userSpaceOnUse">
+              <stop stop-color="#16D5FF"/><stop offset="0.55" stop-color="#267BFF"/><stop offset="1" stop-color="#B43DFF"/>
+            </linearGradient>
+          </defs>
+          <rect x="72" y="72" width="880" height="880" rx="220" fill="#080D20"/>
+          <rect x="80" y="80" width="864" height="864" rx="212" fill="none" stroke="url(#swFrame)" stroke-width="24"/>
+          <g fill="none" stroke="url(#swBars)" stroke-width="38" stroke-linecap="round">
+            <path d="M190 496v32"/><path d="M250 442v140"/><path d="M310 390v244"/><path d="M370 452v120"/>
+            <path d="M654 452v120"/><path d="M714 390v244"/><path d="M774 442v140"/><path d="M834 496v32"/>
+          </g>
+          <path d="M690 300H470c-105 0-176 61-176 145 0 68 48 110 137 141l160 56c54 19 82 47 82 83 0 44-39 75-105 75H334"
+                fill="none" stroke="url(#swWave)" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       </div>
       <div class="brand-title">
