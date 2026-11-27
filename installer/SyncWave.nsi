@@ -1,25 +1,16 @@
-!include "MUI2.nsh"
-
 Name "SyncWave"
+Caption "SyncWave 1.0.0 Setup"
 OutFile "..\dist\SyncWave-Setup-1.0.0.exe"
 InstallDir "$PROGRAMFILES64\SyncWave"
 InstallDirRegKey HKLM "Software\SyncWave" "Install_Dir"
 RequestExecutionLevel admin
 Unicode True
 
-!define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_RUN "$INSTDIR\syncwave_gui.exe"
-!define MUI_FINISHPAGE_RUN_TEXT "Launch SyncWave now"
+Page directory
+Page instfiles
 
-!insertmacro MUI_PAGE_WELCOME
-!insertmacro MUI_PAGE_DIRECTORY
-!insertmacro MUI_PAGE_INSTFILES
-!insertmacro MUI_PAGE_FINISH
-
-!insertmacro MUI_UNPAGE_CONFIRM
-!insertmacro MUI_UNPAGE_INSTFILES
-
-!insertmacro MUI_LANGUAGE "English"
+UninstPage confirm
+UninstPage instfiles
 
 Section "SyncWave (required)"
     SectionIn RO
