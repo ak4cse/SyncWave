@@ -77,10 +77,22 @@ void VlcMediaEngine::initLibVlc() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (vlcInstance_) return;
 
-    // Ensure VLC plugin directory is known if installed in standard location
-    const char* defaultVlcDir = "C:\\Program Files\\VideoLAN\\VLC";
-    if (std::filesystem::exists(defaultVlcDir)) {
-        SetEnvironmentVariableA("VLC_PLUGIN_PATH", "C:\\Program Files\\VideoLAN\\VLC\\plugins");
+    // Ensure VLC plugin directory is known if installed in standard location.
+    // libvlccore.dll (msvcrt.dll) reads its own CRT environ via getenv("VLC_PLUGIN_PATH"),
+    // so update Win32 env, UCRT env, and msvcrt.dll's _putenv if loaded.
+    const char* defaultPluginsDir = "C:\\Program Files\\VideoLAN\\VLC\\plugins";
+    if (std::filesystem::exists(defaultPluginsDir)) {
+        SetEnvironmentVariableA("VLC_PLUGIN_PATH", defaultPluginsDir);
+        const std::string envEntry = std::string("VLC_PLUGIN_PATH=") + defaultPluginsDir;
+        _putenv(envEntry.c_str());
+        if (HMODULE hMsvcrt = GetModuleHandleA("msvcrt.dll")) {
+            using PutEnvFn = int(__cdecl*)(const char*);
+            auto msvcrtPutEnv = reinterpret_cast<PutEnvFn>(
+                reinterpret_cast<void*>(GetProcAddress(hMsvcrt, "_putenv")));
+            if (msvcrtPutEnv) {
+                msvcrtPutEnv(envEntry.c_str());
+            }
+        }
     }
 
     const char* const vlcArgs[] = {
@@ -94,6 +106,10 @@ void VlcMediaEngine::initLibVlc() {
     if (!vlcInstance_) {
         // Fallback without extra arguments
         vlcInstance_ = libvlc_new(0, nullptr);
+    }
+    if (!vlcInstance_) {
+        const char* err = libvlc_errmsg();
+        lastError_ = std::string("libvlc_new failed: ") + (err ? err : "check VLC plugins path");
     }
 }
 
@@ -116,11 +132,13 @@ void VlcMediaEngine::cleanupLibVlc() {
 
 bool VlcMediaEngine::load(const std::string& filePathOrUrl) {
     std::lock_guard<std::mutex> lock(mutex_);
-    lastError_.clear();
     if (!vlcInstance_) {
-        lastError_ = "VLC engine instance is not initialized.";
+        if (lastError_.empty()) {
+            lastError_ = "VLC engine instance is not initialized.";
+        }
         return false;
     }
+    lastError_.clear();
 
     if (mediaPlayer_) {
         libvlc_media_player_stop(mediaPlayer_);

@@ -3801,7 +3801,17 @@ void testGuiEngineContractIntegrationM15() {
     // 3. Invalid media load failure handling (GUI survival)
     bool invalidStart = engine->startMedia("nonexistent_video_path.mp4", selectedIds);
     TEST_ASSERT(!invalidStart, "GUI receives false on nonexistent media without crashing");
+    TEST_ASSERT(!engine->getLastError().empty(), "GUI receives descriptive error message on nonexistent media");
     TEST_ASSERT(!engine->isRunning(), "Engine remains cleanly stopped after failed start");
+
+    // 3b. Valid media playback start via public GUI engine API
+    bool validStart = engine->startMedia("test_av.mp4", selectedIds);
+    TEST_ASSERT(validStart, "GUI engine starts playback on valid media file and active outputs");
+    TEST_ASSERT(engine->isRunning(), "Engine reports running after valid startMedia");
+    auto runningDiag = engine->getDiagnostics();
+    TEST_ASSERT(runningDiag.media.isLoaded, "Diagnostics report media is loaded");
+    engine->stop();
+    TEST_ASSERT(!engine->isRunning(), "Engine stops cleanly after valid media playback");
 
     // 4. Pausing and Resuming when not playing (idempotency)
     engine->pause();

@@ -76,19 +76,40 @@ public:
 
         activeSource_ = "MediaVlc";
         auto& router = audioEngine_->outputRouter();
-        router.closeOutputs();
+        router.clearOutputs();
 
+        size_t addedCount = 0;
         for (const auto& id : outputIds) {
             auto dev = deviceManager_->getDeviceById(id);
             if (dev) {
                 router.addOutput(*dev);
+                addedCount++;
             }
+        }
+
+        if (addedCount == 0) {
+            lastError_ = "No valid output devices selected.";
+            activeSource_ = "None";
+            return false;
+        }
+
+        const auto masterFmt = MasterAudioBus::canonicalFormat();
+        audioEngine_->masterBus().initialize(masterFmt, masterFmt.sampleRate);
+        audioEngine_->masterBus().reset();
+
+        if (!router.initializeOutputs(masterFmt.sampleRate, masterFmt.channels)) {
+            lastError_ = "Failed to initialize selected WASAPI output devices.";
+            router.clearOutputs();
+            activeSource_ = "None";
+            return false;
         }
 
         applySyncSettings();
 
         if (!router.startOutputs()) {
-            router.closeOutputs();
+            lastError_ = "Failed to start WASAPI output streams.";
+            router.clearOutputs();
+            activeSource_ = "None";
             return false;
         }
 
@@ -96,16 +117,18 @@ public:
         if (!mediaEngine_->load(filePathOrUrl)) {
             lastError_ = mediaEngine_->lastError();
             router.stopOutputs();
-            router.closeOutputs();
+            router.clearOutputs();
             mediaEngine_.reset();
+            activeSource_ = "None";
             return false;
         }
 
         if (!mediaEngine_->play()) {
             lastError_ = mediaEngine_->lastError();
             router.stopOutputs();
-            router.closeOutputs();
+            router.clearOutputs();
             mediaEngine_.reset();
+            activeSource_ = "None";
             return false;
         }
 
