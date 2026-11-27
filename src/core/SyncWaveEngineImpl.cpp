@@ -2,6 +2,7 @@
 #include "../audio/AudioEngine.h"
 #include "../av/VlcMediaEngine.h"
 #include "../windows/DefaultAudioSwitcher.h"
+#include "../windows/EndpointVolumeController.h"
 #include <windows.h>
 #include <psapi.h>
 #include <algorithm>
@@ -292,6 +293,14 @@ public:
         }
         deviceMutes_[index] = muted;
         audioEngine_->outputRouter().setDeviceMuted(index, muted);
+    }
+
+    bool setEndpointMasterVolume(const std::string& deviceId, float volume01) override {
+        return EndpointVolumeController::setMasterVolume(deviceId, volume01);
+    }
+
+    bool setEndpointMasterMuted(const std::string& deviceId, bool muted) override {
+        return EndpointVolumeController::setMute(deviceId, muted);
     }
 
     void setVideoWindow(void* hwnd) override {

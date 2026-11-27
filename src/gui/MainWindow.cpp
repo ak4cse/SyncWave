@@ -259,7 +259,7 @@ bool MainWindow::create(int nCmdShow) {
     wc.lpfnWndProc = MainWindow::WndProc;
     wc.hInstance = hInstance_;
     wc.lpszClassName = CLASS_NAME;
-    wc.hbrBackground = CreateSolidBrush(RGB(15, 17, 21));
+    wc.hbrBackground = CreateSolidBrush(RGB(0, 0, 0));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     RegisterClassW(&wc);
@@ -476,6 +476,14 @@ void MainWindow::onWebMessageReceived(const std::wstring& messageJson) {
         size_t idx = static_cast<size_t>(std::max(0.0, extractJsonNumber(json, "index")));
         bool muted = extractJsonBool(json, "muted", false);
         engine_->setDeviceMuted(idx, muted);
+    } else if (cmd == "setEndpointVolume") {
+        std::string id = extractJsonString(json, "id");
+        float vol = static_cast<float>(extractJsonNumber(json, "volume", 0.5));
+        engine_->setEndpointMasterVolume(id, vol);
+    } else if (cmd == "setEndpointMuted") {
+        std::string id = extractJsonString(json, "id");
+        bool muted = extractJsonBool(json, "muted", false);
+        engine_->setEndpointMasterMuted(id, muted);
     } else if (cmd == "setDelays") {
         auto delays = extractJsonNumberArray(json, "delays");
         engine_->setManualDelays(delays);

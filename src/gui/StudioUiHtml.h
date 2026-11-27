@@ -10,23 +10,20 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
 <title>SyncWave</title>
 <style>
   :root {
-    --bg: #0e1014;
-    --surface: #15181f;
-    --surface-2: #1b1f28;
-    --surface-3: #222733;
-    --border: rgba(255, 255, 255, 0.08);
-    --border-strong: rgba(255, 255, 255, 0.14);
-    --text: #f3f4f6;
-    --text-dim: #9ca3af;
-    --text-muted: #6b7280;
-    --accent: #10b981;
-    --accent-dim: rgba(16, 185, 129, 0.14);
-    --sky: #38bdf8;
-    --danger: #ef4444;
-    --danger-dim: rgba(239, 68, 68, 0.14);
-    --amber: #f59e0b;
-    --amber-dim: rgba(245, 158, 11, 0.12);
-    --radius: 10px;
+    --bg: #000000;
+    --surface: #0b0b0e;
+    --surface-2: #141419;
+    --surface-3: #1e1e26;
+    --border: #272730;
+    --border-hi: #f4f4f5;
+    --text: #ffffff;
+    --text-dim: #a1a1aa;
+    --text-muted: #71717a;
+    --mint: #00e599;
+    --amber: #ffb800;
+    --crimson: #ff3355;
+    --cyan: #00d2ff;
+    --radius: 2px;
     --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
     --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
   }
@@ -47,6 +44,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     display: flex;
     flex-direction: column;
     height: 100vh;
+    background: var(--bg);
   }
 
   /* Header */
@@ -55,8 +53,8 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     align-items: center;
     justify-content: space-between;
     padding: 14px 22px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    border-bottom: 2px solid var(--border);
     gap: 16px;
   }
 
@@ -67,26 +65,28 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .brand-mark {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    background: linear-gradient(145deg, #1b222c, #11141a);
-    border: 1px solid var(--border-strong);
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius);
+    background: var(--mint);
+    color: #000000;
+    border: 2px solid #ffffff;
+    box-shadow: 3px 3px 0px #272730;
     display: grid;
     place-items: center;
-    color: var(--accent);
   }
 
   .brand-title {
     display: flex;
     flex-direction: column;
-    gap: 1px;
+    gap: 2px;
   }
 
   .brand-name {
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
+    font-size: 16px;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
     color: var(--text);
   }
 
@@ -94,39 +94,35 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-dim);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
 
   .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
+    width: 7px;
+    height: 7px;
     background: var(--text-muted);
-    transition: background 0.2s, box-shadow 0.2s;
   }
 
-  .status-pill.live {
-    color: var(--accent);
-  }
-  .status-pill.live .dot {
-    background: var(--accent);
-    box-shadow: 0 0 8px var(--accent);
-  }
+  .status-pill.live { color: var(--mint); }
+  .status-pill.live .dot { background: var(--mint); }
 
   .header-controls {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 10px;
   }
 
   .segmented {
     display: inline-flex;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 3px;
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 2px;
     gap: 2px;
   }
 
@@ -134,60 +130,65 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     background: transparent;
     border: none;
     color: var(--text-dim);
-    font-family: var(--font);
-    font-size: 12px;
-    font-weight: 500;
-    padding: 5px 11px;
-    border-radius: 6px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 6px 11px;
+    border-radius: var(--radius);
     cursor: pointer;
-    transition: all 0.15s ease;
   }
-
   .seg-btn:hover { color: var(--text); }
   .seg-btn.active {
-    background: var(--surface-3);
-    color: var(--text);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
-  }
-
-  .btn-primary {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 18px;
-    border-radius: 8px;
-    border: 1px solid rgba(16, 185, 129, 0.4);
-    background: var(--accent);
-    color: #041b11;
-    font-family: var(--font);
-    font-size: 13px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: filter 0.15s, transform 0.08s;
-  }
-  .btn-primary:hover { filter: brightness(1.08); }
-  .btn-primary:active { transform: scale(0.98); }
-
-  .btn-primary.stop {
-    background: var(--danger-dim);
-    color: #fca5a5;
-    border-color: rgba(239, 68, 68, 0.35);
+    background: #ffffff;
+    color: #000000;
   }
 
   .btn-icon {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius);
+    border: 2px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
     cursor: pointer;
-    transition: all 0.15s;
+    box-shadow: 2px 2px 0px #272730;
+    transition: transform 0.08s, box-shadow 0.08s;
   }
-  .btn-icon:hover { color: var(--text); border-color: var(--border-strong); }
+  .btn-icon:hover { border-color: #ffffff; }
+  .btn-icon:active { transform: translate(2px, 2px); box-shadow: 0px 0px 0px #000; }
+
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 18px;
+    border-radius: var(--radius);
+    border: 2px solid #ffffff;
+    background: var(--mint);
+    color: #000000;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    box-shadow: 3px 3px 0px #ffffff;
+    transition: transform 0.08s, box-shadow 0.08s;
+  }
+  .btn-primary:hover { transform: translate(-1px, -1px); box-shadow: 4px 4px 0px #ffffff; }
+  .btn-primary:active { transform: translate(2px, 2px); box-shadow: 0px 0px 0px #ffffff; }
+
+  .btn-primary.stop {
+    background: var(--crimson);
+    color: #ffffff;
+    border-color: #ffffff;
+    box-shadow: 3px 3px 0px #ffffff;
+  }
 
   /* Main content */
   .main {
@@ -200,7 +201,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .main::-webkit-scrollbar { width: 6px; }
-  .main::-webkit-scrollbar-thumb { background: var(--surface-3); border-radius: 3px; }
+  .main::-webkit-scrollbar-thumb { background: var(--border); }
 
   .section-head {
     display: flex;
@@ -209,16 +210,17 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .section-title {
+    font-family: var(--mono);
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.07em;
-    color: var(--text-muted);
+    letter-spacing: 0.08em;
+    color: var(--text);
   }
 
   .section-sub {
     font-size: 11.5px;
-    color: var(--text-dim);
+    color: var(--text-muted);
   }
 
   .banner {
@@ -232,48 +234,50 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
   .banner.show { display: flex; }
   .banner.error {
-    background: var(--danger-dim);
-    border: 1px solid rgba(239, 68, 68, 0.3);
-    color: #fecaca;
+    background: #23060c;
+    border: 2px solid var(--crimson);
+    color: #ffffff;
+    box-shadow: 3px 3px 0px var(--crimson);
   }
   .banner.hint {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-dim);
+    background: #141000;
+    border: 2px solid var(--amber);
+    color: #fde68a;
+    box-shadow: 3px 3px 0px var(--amber);
   }
-  .banner strong { color: var(--text); font-weight: 600; }
+  .banner strong { color: #ffffff; font-weight: 700; }
   .kbd {
     display: inline-block;
     padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--surface-3);
-    border: 1px solid var(--border-strong);
+    background: #000000;
+    border: 2px solid var(--amber);
     font-family: var(--mono);
     font-size: 11px;
-    color: var(--text);
+    font-weight: 700;
+    color: var(--amber);
   }
 
   .device-list {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 12px;
   }
 
   .device-card {
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 2px solid var(--border);
     border-radius: var(--radius);
     padding: 14px 16px;
-    transition: border-color 0.18s, background 0.18s, opacity 0.18s;
+    transition: border-color 0.12s, opacity 0.12s;
   }
 
   .device-card.enabled {
-    border-color: var(--border-strong);
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    border-color: var(--border-hi);
+    box-shadow: 4px 4px 0px #1e1e26;
   }
 
   .device-card.disabled {
-    opacity: 0.62;
+    opacity: 0.52;
   }
 
   .device-top {
@@ -290,22 +294,22 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     min-width: 0;
   }
 
-  /* Toggle switch */
+  /* Brutalist Square Toggle */
   .switch {
     position: relative;
-    width: 36px;
-    height: 20px;
+    width: 40px;
+    height: 22px;
     flex-shrink: 0;
   }
   .switch input { opacity: 0; width: 0; height: 0; }
   .switch-track {
     position: absolute;
     inset: 0;
-    background: var(--surface-3);
-    border: 1px solid var(--border-strong);
-    border-radius: 999px;
+    background: #000000;
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
     cursor: pointer;
-    transition: background 0.18s, border-color 0.18s;
+    transition: background 0.12s, border-color 0.12s;
   }
   .switch-track::after {
     content: "";
@@ -314,28 +318,27 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     left: 2px;
     width: 14px;
     height: 14px;
-    border-radius: 50%;
-    background: var(--text-dim);
-    transition: transform 0.18s, background 0.18s;
+    background: var(--text-muted);
+    transition: transform 0.12s, background 0.12s;
   }
   .switch input:checked + .switch-track {
-    background: var(--accent-dim);
-    border-color: rgba(16, 185, 129, 0.55);
+    background: var(--mint);
+    border-color: #ffffff;
   }
   .switch input:checked + .switch-track::after {
-    transform: translateX(16px);
-    background: var(--accent);
+    transform: translateX(18px);
+    background: #000000;
   }
 
   .dev-icon {
-    width: 30px;
-    height: 30px;
-    border-radius: 7px;
+    width: 32px;
+    height: 32px;
+    border-radius: var(--radius);
     background: var(--surface-2);
-    border: 1px solid var(--border);
+    border: 2px solid var(--border);
     display: grid;
     place-items: center;
-    color: var(--text-dim);
+    color: var(--text);
     flex-shrink: 0;
   }
 
@@ -346,8 +349,8 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .dev-name {
-    font-size: 13.5px;
-    font-weight: 600;
+    font-size: 14px;
+    font-weight: 700;
     color: var(--text);
     white-space: nowrap;
     overflow: hidden;
@@ -358,36 +361,38 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     display: flex;
     align-items: center;
     gap: 6px;
-    margin-top: 2px;
+    margin-top: 3px;
   }
 
   .tag {
-    font-size: 10.5px;
-    font-weight: 500;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
     padding: 1px 6px;
-    border-radius: 4px;
-    background: var(--surface-2);
+    background: #000000;
     border: 1px solid var(--border);
     color: var(--text-dim);
   }
-  .tag.bt { color: var(--sky); border-color: rgba(56, 189, 248, 0.25); background: rgba(56, 189, 248, 0.08); }
-  .tag.virt { color: var(--amber); border-color: rgba(245, 158, 11, 0.25); background: var(--amber-dim); }
+  .tag.bt { color: var(--cyan); border-color: var(--cyan); }
+  .tag.virt { color: var(--amber); border-color: var(--amber); }
 
   .dev-badge {
     font-family: var(--mono);
     font-size: 11px;
-    padding: 3px 8px;
-    border-radius: 6px;
-    background: var(--surface-2);
-    border: 1px solid var(--border);
+    font-weight: 700;
+    text-transform: uppercase;
+    padding: 4px 9px;
+    background: #000000;
+    border: 2px solid var(--border);
     color: var(--text-dim);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
   .dev-badge.locked {
-    color: var(--accent);
-    background: var(--accent-dim);
-    border-color: rgba(16, 185, 129, 0.3);
+    color: #000000;
+    background: var(--mint);
+    border-color: #ffffff;
   }
 
   /* Controls grid inside active card */
@@ -396,8 +401,8 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     grid-template-columns: 1fr 1.25fr;
     gap: 18px;
     margin-top: 14px;
-    padding-top: 12px;
-    border-top: 1px solid var(--border);
+    padding-top: 13px;
+    border-top: 2px solid var(--border);
   }
 
   .device-card.disabled .device-controls {
@@ -407,7 +412,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   .ctrl-group {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 8px;
   }
 
   .ctrl-label-row {
@@ -417,15 +422,18 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .ctrl-label {
-    font-size: 11px;
-    font-weight: 500;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
     color: var(--text-dim);
   }
 
   .ctrl-val {
     font-family: var(--mono);
-    font-size: 12px;
-    font-weight: 600;
+    font-size: 12.5px;
+    font-weight: 800;
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
@@ -436,13 +444,14 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     gap: 8px;
   }
 
+  /* Brutalist Fader */
   input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
     flex: 1;
-    height: 5px;
-    border-radius: 999px;
+    height: 8px;
     background: var(--surface-3);
+    border: 1px solid var(--border);
     outline: none;
     cursor: pointer;
   }
@@ -450,47 +459,48 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    background: #f3f4f6;
-    border: 2px solid #0e1014;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.6);
+    width: 13px;
+    height: 22px;
+    background: #ffffff;
+    border: 2px solid #000000;
+    box-shadow: 2px 2px 0px #000000;
     cursor: pointer;
-    transition: transform 0.1s;
   }
-  input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.15); }
+  input[type="range"]::-webkit-slider-thumb:hover {
+    background: var(--mint);
+  }
 
   .mini-btn {
-    height: 24px;
-    padding: 0 7px;
-    border-radius: 5px;
-    border: 1px solid var(--border);
-    background: var(--surface-2);
-    color: var(--text-dim);
+    height: 26px;
+    padding: 0 8px;
+    border-radius: var(--radius);
+    border: 2px solid var(--border);
+    background: #000000;
+    color: var(--text);
     font-family: var(--mono);
     font-size: 11px;
+    font-weight: 700;
     cursor: pointer;
-    transition: all 0.12s;
+    transition: border-color 0.1s, background 0.1s;
   }
-  .mini-btn:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-3); }
+  .mini-btn:hover { border-color: #ffffff; background: var(--surface-3); }
   .mini-btn.active {
-    background: var(--danger-dim);
-    color: #fca5a5;
-    border-color: rgba(239, 68, 68, 0.35);
+    background: var(--crimson);
+    color: #ffffff;
+    border-color: #ffffff;
   }
 
   /* Footer & Diagnostics Drawer */
   .footer {
-    background: var(--surface);
-    border-top: 1px solid var(--border);
+    background: var(--bg);
+    border-top: 2px solid var(--border);
   }
 
   .diag-drawer {
     display: none;
     padding: 12px 22px;
-    border-bottom: 1px solid var(--border);
-    background: #111319;
+    border-bottom: 2px solid var(--border);
+    background: var(--surface);
   }
   .diag-drawer.open { display: block; }
 
@@ -498,29 +508,30 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     width: 100%;
     border-collapse: collapse;
     font-family: var(--mono);
-    font-size: 11.5px;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
   }
   .diag-table th {
     text-align: left;
     color: var(--text-muted);
-    font-weight: 500;
+    font-weight: 700;
+    text-transform: uppercase;
     padding: 4px 8px;
-    border-bottom: 1px solid var(--border);
+    border-bottom: 2px solid var(--border);
   }
   .diag-table td {
     padding: 6px 8px;
-    color: var(--text-dim);
-    border-bottom: 1px solid rgba(255,255,255,0.03);
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
   }
 
   .footer-bar {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 9px 22px;
+    padding: 10px 22px;
     font-size: 11.5px;
-    color: var(--text-muted);
+    color: var(--text-dim);
   }
 
   .footer-stats {
@@ -529,18 +540,17 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   }
 
   .btn-link {
-    background: none;
-    border: none;
-    color: var(--text-dim);
-    font-family: var(--font);
-    font-size: 11.5px;
-    font-weight: 500;
+    background: var(--surface);
+    border: 2px solid var(--border);
+    padding: 3px 10px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
     cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
   }
-  .btn-link:hover { color: var(--text); }
+  .btn-link:hover { border-color: #ffffff; }
 </style>
 </head>
 <body>
@@ -548,7 +558,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   <header class="header">
     <div class="brand">
       <div class="brand-mark">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="square" stroke-linejoin="miter">
           <path d="M2 12h3l2.5-6 4 12 3.5-8 2.5 2H22"/>
         </svg>
       </div>
@@ -568,7 +578,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         <button class="seg-btn" data-mode="none">Direct</button>
       </div>
       <button class="btn-icon" id="btnRefresh" title="Refresh audio devices">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" stroke-linejoin="miter">
           <polyline points="23 4 23 10 17 10"></polyline>
           <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
         </svg>
@@ -586,13 +596,13 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
 
     <div class="banner hint" id="vlcHintBanner">
       <span>
-        <strong>Watching in external VLC?</strong> To match video lip-sync across your outputs, press <span class="kbd">J</span> in VLC until audio delay is <strong id="vlcDelayRec">-200 ms</strong>.
+        <strong>External VLC Lip-Sync:</strong> Press <span class="kbd">J</span> in VLC until audio delay is <strong id="vlcDelayRec">-200 ms</strong> to match screen video.
       </span>
     </div>
 
     <div class="section-head">
       <span class="section-title">Output Endpoints</span>
-      <span class="section-sub">Toggle devices to sync. Windows audio auto-routes on Start and restores on Stop.</span>
+      <span class="section-sub">Independent hardware master volume (50% default, auto-saved).</span>
     </div>
 
     <div class="device-list" id="deviceList"></div>
@@ -616,17 +626,19 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       </table>
     </div>
     <div class="footer-bar">
-      <span class="footer-stats" id="footerStats">48000 Hz Float32 &middot; Idle</span>
+      <span class="footer-stats" id="footerStats">48000 HZ FLOAT32 // IDLE</span>
       <button class="btn-link" id="btnToggleDiag">Diagnostics &#9662;</button>
     </div>
   </footer>
 </div>
 
 <script>
+  const PREFS_KEY = 'syncwave_prefs_v1';
+
   const state = {
     devices: [],
     enabledIds: new Set(),
-    volumes: {},   // id -> 0..100
+    volumes: {},   // id -> 0..100 (default 50 on first launch)
     muted: {},     // id -> bool
     delays: {},    // id -> 0..400 ms
     syncMode: 'adaptive',
@@ -634,6 +646,30 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     telemetry: null,
     diagOpen: false
   };
+
+  function loadPrefs() {
+    try {
+      const raw = localStorage.getItem(PREFS_KEY);
+      return raw ? JSON.parse(raw) : { syncMode: 'adaptive', devices: {} };
+    } catch {
+      return { syncMode: 'adaptive', devices: {} };
+    }
+  }
+
+  function savePrefs() {
+    try {
+      const prefs = { syncMode: state.syncMode, devices: {} };
+      state.devices.forEach(d => {
+        prefs.devices[d.id] = {
+          enabled: state.enabledIds.has(d.id),
+          volume: state.volumes[d.id] ?? 50,
+          muted: !!state.muted[d.id],
+          delay: state.delays[d.id] ?? 0
+        };
+      });
+      localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+    } catch {}
+  }
 
   function post(obj) {
     if (window.chrome && window.chrome.webview) {
@@ -651,21 +687,26 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     post({ cmd: 'setDelays', delays });
   }
 
-  function pushAllVolumes() {
-    const selected = getSelectedOrderedIds();
-    selected.forEach((id, idx) => {
-      const vol = (state.volumes[id] ?? 100) / 100.0;
-      const muted = !!state.muted[id];
-      post({ cmd: 'setDeviceVolume', index: idx, volume: vol });
-      post({ cmd: 'setDeviceMuted', index: idx, muted });
+  function applyAllEndpointVolumes() {
+    state.devices.forEach(d => {
+      if (state.enabledIds.has(d.id)) {
+        const vol = (state.volumes[d.id] ?? 50) / 100.0;
+        const muted = !!state.muted[d.id];
+        post({ cmd: 'setEndpointVolume', id: d.id, volume: vol });
+        post({ cmd: 'setEndpointMuted', id: d.id, muted });
+      }
     });
+  }
+
+  function sliderStyle(pct, colorVar) {
+    return `background: linear-gradient(to right, ${colorVar} 0%, ${colorVar} ${pct}%, #1e1e26 ${pct}%, #1e1e26 100%)`;
   }
 
   function speakerSvg(isBt) {
     if (isBt) {
-      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z"/></svg>`;
+      return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="square" stroke-linejoin="miter"><path d="M3 18v-6a9 9 0 0 1 18 0v6"/><path d="M21 19a2 2 0 0 1-2 2h-1v-6h3zM3 19a2 2 0 0 0 2 2h1v-6H3z"/></svg>`;
     }
-    return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
+    return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="square" stroke-linejoin="miter"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/></svg>`;
   }
 
   function renderDevices() {
@@ -682,7 +723,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     state.devices.forEach(dev => {
       const enabled = state.enabledIds.has(dev.id);
       const activeIdx = selected.indexOf(dev.id);
-      const vol = state.volumes[dev.id] ?? 100;
+      const vol = state.volumes[dev.id] ?? 50;
       const muted = !!state.muted[dev.id];
       const delay = state.delays[dev.id] ?? 0;
       const ep = epMap.get(dev.id);
@@ -694,13 +735,15 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       if (enabled && state.isRunning && ep) {
         const isLocked = ep.driftState === 'Locked' || ep.syncState !== 'Disabled';
         const ppm = (ep.driftPpm >= 0 ? '+' : '') + ep.driftPpm.toFixed(1) + ' ppm';
-        badgeHtml = `<span class="dev-badge ${isLocked ? 'locked' : ''}">${ep.driftState} &middot; ${ppm}</span>`;
+        badgeHtml = `<span class="dev-badge ${isLocked ? 'locked' : ''}">${ep.driftState} // ${ppm}</span>`;
       }
 
       let tags = '';
       if (dev.isBluetooth) tags += `<span class="tag bt">Bluetooth</span>`;
       if (dev.isVirtual) tags += `<span class="tag virt">Loopback Carrier</span>`;
-      if (dev.isDefault) tags += `<span class="tag">Windows Default</span>`;
+      if (dev.isDefault) tags += `<span class="tag">Default</span>`;
+
+      const delayPct = (delay / 400.0) * 100.0;
 
       card.innerHTML = `
         <div class="device-top">
@@ -720,12 +763,12 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         <div class="device-controls">
           <div class="ctrl-group">
             <div class="ctrl-label-row">
-              <span class="ctrl-label">Output Gain</span>
+              <span class="ctrl-label">Master Volume (Hardware)</span>
               <span class="ctrl-val" id="vol-val-${activeIdx}">${muted ? 'MUTED' : vol + '%'}</span>
             </div>
             <div class="slider-row">
-              <button class="mini-btn ${muted ? 'active' : ''}" data-mute="${dev.id}">${muted ? 'Unmute' : 'Mute'}</button>
-              <input type="range" min="0" max="100" value="${vol}" data-vol="${dev.id}" />
+              <button class="mini-btn ${muted ? 'active' : ''}" data-mute="${dev.id}">${muted ? 'UNMUTE' : 'MUTE'}</button>
+              <input type="range" min="0" max="100" value="${vol}" style="${sliderStyle(vol, 'var(--mint)')}" data-vol="${dev.id}" />
             </div>
           </div>
           <div class="ctrl-group">
@@ -736,7 +779,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
             <div class="slider-row">
               <button class="mini-btn" data-nudge="${dev.id}" data-delta="-5">-5</button>
               <button class="mini-btn" data-nudge="${dev.id}" data-delta="-1">-1</button>
-              <input type="range" min="0" max="400" value="${delay}" data-delay="${dev.id}" />
+              <input type="range" min="0" max="400" value="${delay}" style="${sliderStyle(delayPct, 'var(--amber)')}" data-delay="${dev.id}" />
               <button class="mini-btn" data-nudge="${dev.id}" data-delta="1">+1</button>
               <button class="mini-btn" data-nudge="${dev.id}" data-delta="5">+5</button>
               <button class="mini-btn" data-nudge="${dev.id}" data-delta="reset">0</button>
@@ -754,11 +797,12 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         const id = e.target.dataset.toggle;
         if (e.target.checked) state.enabledIds.add(id);
         else state.enabledIds.delete(id);
+        savePrefs();
         renderDevices();
+        applyAllEndpointVolumes();
         if (state.isRunning) {
           post({ cmd: 'startSync', outputs: getSelectedOrderedIds(), syncMode: state.syncMode });
           pushAllDelays();
-          pushAllVolumes();
         }
       });
     });
@@ -768,12 +812,14 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         const id = e.target.dataset.vol;
         const val = parseInt(e.target.value, 10);
         state.volumes[id] = val;
+        e.target.style.cssText = sliderStyle(val, 'var(--mint)');
         const idx = getSelectedOrderedIds().indexOf(id);
         if (idx >= 0) {
           const lbl = document.getElementById(`vol-val-${idx}`);
           if (lbl && !state.muted[id]) lbl.textContent = val + '%';
-          post({ cmd: 'setDeviceVolume', index: idx, volume: val / 100.0 });
         }
+        post({ cmd: 'setEndpointVolume', id, volume: val / 100.0 });
+        savePrefs();
       });
     });
 
@@ -781,10 +827,8 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       el.addEventListener('click', (e) => {
         const id = e.target.dataset.mute;
         state.muted[id] = !state.muted[id];
-        const idx = getSelectedOrderedIds().indexOf(id);
-        if (idx >= 0) {
-          post({ cmd: 'setDeviceMuted', index: idx, muted: !!state.muted[id] });
-        }
+        post({ cmd: 'setEndpointMuted', id, muted: !!state.muted[id] });
+        savePrefs();
         renderDevices();
       });
     });
@@ -794,12 +838,14 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         const id = e.target.dataset.delay;
         const val = parseInt(e.target.value, 10);
         state.delays[id] = val;
+        e.target.style.cssText = sliderStyle((val / 400.0) * 100.0, 'var(--amber)');
         const idx = getSelectedOrderedIds().indexOf(id);
         if (idx >= 0) {
           const lbl = document.getElementById(`delay-val-${idx}`);
           if (lbl) lbl.textContent = val + ' ms';
         }
         pushAllDelays();
+        savePrefs();
       });
     });
 
@@ -811,6 +857,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         const next = delta === 'reset' ? 0 : Math.max(0, Math.min(400, cur + parseInt(delta, 10)));
         state.delays[id] = next;
         pushAllDelays();
+        savePrefs();
         renderDevices();
       });
     });
@@ -827,18 +874,16 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
 
     if (state.isRunning) {
       pill.classList.add('live');
-      statusText.textContent = 'Live · System Audio';
+      statusText.textContent = 'LIVE // SYSTEM AUDIO';
       btnSync.classList.add('stop');
       btnSyncLabel.textContent = 'Stop Sync';
     } else {
       pill.classList.remove('live');
-      statusText.textContent = 'Standby';
+      statusText.textContent = 'STANDBY';
       btnSync.classList.remove('stop');
       btnSyncLabel.textContent = 'Start Sync';
     }
 
-    // Update live badges without destroying active sliders while dragging
-    const selected = getSelectedOrderedIds();
     const epMap = new Map();
     (t.endpoints || []).forEach(ep => epMap.set(ep.id, ep));
     document.querySelectorAll('.device-card').forEach((card, i) => {
@@ -852,14 +897,13 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
         const isLocked = ep.driftState === 'Locked' || ep.syncState !== 'Disabled';
         const ppm = (ep.driftPpm >= 0 ? '+' : '') + ep.driftPpm.toFixed(1) + ' ppm';
         badge.className = `dev-badge ${isLocked ? 'locked' : ''}`;
-        badge.innerHTML = `${ep.driftState} &middot; ${ppm}`;
+        badge.textContent = `${ep.driftState} // ${ppm}`;
       } else {
         badge.className = 'dev-badge';
         badge.textContent = enabled ? 'Ready' : 'Bypassed';
       }
     });
 
-    // Smart VLC lip-sync tip when running with significant output delay
     const vlcBanner = document.getElementById('vlcHintBanner');
     if (state.isRunning && t.maxLatencyMs >= 60) {
       const rec = Math.round(t.maxLatencyMs / 5) * 5;
@@ -869,9 +913,8 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       vlcBanner.classList.remove('show');
     }
 
-    // Footer & diagnostics
     document.getElementById('footerStats').textContent =
-      `${t.sampleRate || 48000} Hz Float32 · CPU ${t.cpu.toFixed(1)}% · ${t.memoryMb.toFixed(0)} MB`;
+      `${t.sampleRate || 48000} HZ FLOAT32 // CPU ${t.cpu.toFixed(1)}% // ${t.memoryMb.toFixed(0)} MB`;
 
     const tbody = document.getElementById('diagBody');
     tbody.innerHTML = (t.endpoints || []).map(ep => `
@@ -894,6 +937,7 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       btn.classList.add('active');
       state.syncMode = btn.dataset.mode;
       post({ cmd: 'setSyncMode', mode: state.syncMode });
+      savePrefs();
     });
   });
 
@@ -906,9 +950,9 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       post({ cmd: 'stopSync' });
     } else {
       const outputs = getSelectedOrderedIds();
+      applyAllEndpointVolumes();
       post({ cmd: 'startSync', outputs, syncMode: state.syncMode });
       pushAllDelays();
-      pushAllVolumes();
     }
   });
 
@@ -922,14 +966,35 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       const msg = event.data;
       if (!msg) return;
       if (msg.type === 'devices') {
-        const firstLoad = state.devices.length === 0;
-        state.devices = msg.devices || [];
-        if (firstLoad) {
-          state.devices.forEach(d => {
-            if (!d.isVirtual) state.enabledIds.add(d.id);
+        const prefs = loadPrefs();
+        if (prefs.syncMode) {
+          state.syncMode = prefs.syncMode;
+          document.querySelectorAll('.seg-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.mode === state.syncMode);
           });
+          post({ cmd: 'setSyncMode', mode: state.syncMode });
         }
+
+        state.devices = msg.devices || [];
+        state.enabledIds.clear();
+        state.devices.forEach(d => {
+          const saved = prefs.devices && prefs.devices[d.id];
+          if (saved) {
+            if (saved.enabled) state.enabledIds.add(d.id);
+            state.volumes[d.id] = typeof saved.volume === 'number' ? saved.volume : 50;
+            state.muted[d.id] = !!saved.muted;
+            state.delays[d.id] = typeof saved.delay === 'number' ? saved.delay : 0;
+          } else {
+            // First time: auto-enable physical outputs, default volume to 50%
+            if (!d.isVirtual) state.enabledIds.add(d.id);
+            state.volumes[d.id] = 50;
+            state.muted[d.id] = false;
+            state.delays[d.id] = 0;
+          }
+        });
+        savePrefs();
         renderDevices();
+        applyAllEndpointVolumes();
       } else if (msg.type === 'telemetry') {
         updateTelemetryUi(msg);
       } else if (msg.type === 'error') {

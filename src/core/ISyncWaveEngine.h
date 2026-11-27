@@ -38,6 +38,8 @@ public:
     virtual void setCalibrationOffsets(const std::vector<double>& offsetsMs) = 0;
     virtual void setDeviceVolume(size_t index, float volume) = 0;
     virtual void setDeviceMuted(size_t index, bool muted) = 0;
+    virtual bool setEndpointMasterVolume(const std::string& deviceId, float volume01) = 0;
+    virtual bool setEndpointMasterMuted(const std::string& deviceId, bool muted) = 0;
     virtual void setVideoWindow(void* hwnd) = 0;
     virtual void setAvSyncDelayMs(double delayMs) = 0;
 
