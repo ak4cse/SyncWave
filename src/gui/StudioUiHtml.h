@@ -697,13 +697,13 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
   </footer>
 </div>
 
-<!-- Cute & Friendly First-Time Welcome Guide -->
+<!-- Friendly First-Time Welcome Guide -->
 <div class="modal-backdrop" id="guideModal">
   <div class="modal">
     <div class="modal-head">
       <div>
-        <div class="modal-title">Welcome to SyncWave!</div>
-        <div class="modal-tagline">No more &ldquo;bro pause it, my Bluetooth is lagging&rdquo; &mdash; ever again.</div>
+        <div class="modal-title">Hey! Welcome to SyncWave</div>
+        <div class="modal-tagline">Movie night sorted &mdash; no more &ldquo;bro pause it, my earbuds are lagging!&rdquo;</div>
       </div>
       <button class="btn-icon" id="btnCloseGuide">&times;</button>
     </div>
@@ -711,27 +711,27 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
       <div class="guide-step">
         <div class="step-num">1</div>
         <div class="step-body">
-          <h4>Pick Your Squad&rsquo;s Gear</h4>
-          <p>Toggle ON the speakers &amp; earphones you want to play together. Every device starts at a chill <strong>50% hardware volume</strong> so nobody&rsquo;s eardrums get surprised, and we remember your exact levels next time!</p>
+          <h4>Turn ON everyone&rsquo;s speakers or earbuds</h4>
+          <p>Flip the switch ON for each device you want to use together. Everyone gets their own volume slider (starting at a chill <strong>50%</strong> so nobody&rsquo;s ears get blasted), and we&rsquo;ll remember your levels next time.</p>
         </div>
       </div>
       <div class="guide-step">
         <div class="step-num">2</div>
         <div class="step-body">
-          <h4>Tame the Bluetooth Time-Traveler</h4>
-          <p>Wireless earbuds take ~180&ndash;220 ms to fly sound through the air. Slide the <strong>Sync Delay</strong> on your wired laptop speakers up until both ears agree it&rsquo;s pure magic.</p>
+          <h4>Click Start Sync &amp; play anything you want</h4>
+          <p>Hit <strong>Start Sync</strong>, then open VLC, YouTube, Netflix, or Spotify as usual. No need to mess with Windows Sound settings &mdash; everything goes back to normal automatically when you stop or close SyncWave.</p>
         </div>
       </div>
       <div class="guide-step">
         <div class="step-num">3</div>
         <div class="step-body">
-          <h4>Hit Start Sync &amp; Press Play Anywhere</h4>
-          <p>Play your movie in <strong>VLC</strong>, watch <strong>YouTube</strong>, or blast <strong>Spotify</strong>. SyncWave quietly handles Windows audio routing in the background and politely puts everything back when you stop or close!</p>
+          <h4>Hear an echo? Fix it in 5 seconds</h4>
+          <p>Bluetooth earbuds naturally arrive a tiny bit later than wired speakers. Slowly slide <strong>Sync Delay</strong> up on the <em>wired speaker</em> until both ears lock together. (Tip: in VLC, press <span class="kbd">J</span> if mouths look slightly ahead of the audio.)</p>
         </div>
       </div>
     </div>
     <div class="modal-foot">
-      <button class="btn-primary" id="btnGuideDone">Let&rsquo;s Sync!</button>
+      <button class="btn-primary" id="btnGuideDone">Got it, let&rsquo;s go!</button>
     </div>
   </div>
 </div>
