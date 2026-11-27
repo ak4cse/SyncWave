@@ -29,7 +29,7 @@ Section "SyncWave (required)"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "DisplayName" "SyncWave — Multi-Device Audio Sync"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "UninstallString" '"$INSTDIR\Uninstall.exe"'
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "DisplayIcon" "$INSTDIR\syncwave_gui.exe"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "Publisher" "SyncWave"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "Publisher" "Ankush"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "DisplayVersion" "1.0.0"
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\SyncWave" "NoRepair" 1

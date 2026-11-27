@@ -692,7 +692,10 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
     </div>
     <div class="footer-bar">
       <span class="footer-stats" id="footerStats">48000 HZ FLOAT32 // IDLE</span>
-      <button class="btn-link" id="btnToggleDiag">Diagnostics &#9662;</button>
+      <span style="display:flex;align-items:center;gap:12px;">
+        <span class="footer-stats" style="color:var(--text-muted);">Built by Ankush</span>
+        <button class="btn-link" id="btnToggleDiag">Diagnostics &#9662;</button>
+      </span>
     </div>
   </footer>
 </div>

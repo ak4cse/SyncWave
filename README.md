@@ -69,3 +69,9 @@ This stages `syncwave_gui.exe`, `syncwave.exe`, and all required runtime DLLs in
 - `src/app/` — CLI interface (`syncwave.exe`)
 - `installer/` — NSIS installer script (`SyncWave.nsi`) & packaging script (`build_installer.ps1`)
 - `tests/` — Automated unit & integration test suite (`syncwave_tests.exe`)
+
+---
+
+## Credits
+
+Developed by **Ankush** ([ak4cse](https://github.com/ak4cse)).
