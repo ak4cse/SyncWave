@@ -15,10 +15,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE /*hPrevInstance*/, PWSTR /*pC
         }
     }
 
-    // Initialize COM MTA for audio background threads
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    // Initialize COM STA on the UI thread (required by WebView2)
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) {
-        MessageBoxW(nullptr, L"Failed to initialize COM MTA subsystem.", L"SyncWave Error", MB_ICONERROR);
+        MessageBoxW(nullptr, L"Failed to initialize COM STA subsystem.", L"SyncWave Error", MB_ICONERROR);
         return 1;
     }
 

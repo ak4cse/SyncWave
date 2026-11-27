@@ -135,11 +135,12 @@ target_link_libraries(syncwave_tests PRIVATE
 
 add_test(NAME Phase1Tests COMMAND syncwave_tests)
 
-# Desktop GUI Executable (M15)
+# Desktop GUI Executable (M15/M16 WebView2 Studio UI)
 add_executable(syncwave_gui WIN32
     src/gui/main_gui.cpp
     src/gui/MainWindow.h
     src/gui/MainWindow.cpp
+    src/gui/StudioUiHtml.h
 )
 
 target_include_directories(syncwave_gui PRIVATE
@@ -152,6 +153,8 @@ endif()
 
 target_link_libraries(syncwave_gui PRIVATE
     syncwave_core
-    comctl32
-    comdlg32
+    ole32
+    oleaut32
+    dwmapi
+    shlwapi
 )
