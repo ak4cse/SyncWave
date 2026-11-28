@@ -2,6 +2,7 @@
 
 #include "../core/ISyncWaveEngine.h"
 #include <windows.h>
+#include <shellapi.h>
 #include <WebView2.h>
 #include <string>
 #include <vector>
@@ -28,6 +29,9 @@ private:
 
     void initWebView();
     void resizeWebView();
+    void addTrayIcon();
+    void removeTrayIcon();
+    void showTrayMenu();
     void sendJsonToUi(const std::string& json);
     void pushDeviceListToUi();
     void pushTelemetryToUi();
@@ -35,6 +39,9 @@ private:
     HINSTANCE hInstance_{nullptr};
     HWND hWnd_{nullptr};
     std::shared_ptr<ISyncWaveEngine> engine_;
+    NOTIFYICONDATAW trayIcon_{};
+    bool trayIconAdded_{false};
+    std::vector<std::string> lastSelectedOutputs_;
 
     HMODULE hWebView2Loader_{nullptr};
     ICoreWebView2Environment* webViewEnv_{nullptr};

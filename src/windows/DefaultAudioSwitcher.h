@@ -3,6 +3,9 @@
 #include "ComHelper.h"
 #include <mmdeviceapi.h>
 #include <unknwn.h>
+#include <shlobj.h>
+#include <filesystem>
+#include <fstream>
 #include <string>
 
 namespace syncwave {
@@ -68,6 +71,51 @@ public:
             CoUninitialize();
         }
         return ok;
+    }
+
+    static std::filesystem::path recoveryFilePath() {
+        wchar_t localAppData[MAX_PATH] = {};
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, localAppData))) {
+            return std::filesystem::path(localAppData) / L"SyncWave" / L"restore_default.txt";
+        }
+        return std::filesystem::temp_directory_path() / L"syncwave_restore_default.txt";
+    }
+
+    static void saveRecoveryDeviceId(const std::string& originalDeviceId) {
+        if (originalDeviceId.empty()) return;
+        std::error_code ec;
+        auto p = recoveryFilePath();
+        std::filesystem::create_directories(p.parent_path(), ec);
+        std::ofstream out(p, std::ios::trunc);
+        if (out.is_open()) {
+            out << originalDeviceId;
+        }
+    }
+
+    static void clearRecoveryDeviceId() {
+        std::error_code ec;
+        std::filesystem::remove(recoveryFilePath(), ec);
+    }
+
+    static bool recoverIfNeeded() {
+        std::error_code ec;
+        auto p = recoveryFilePath();
+        if (!std::filesystem::exists(p, ec)) {
+            return false;
+        }
+        std::string savedId;
+        {
+            std::ifstream in(p);
+            if (in.is_open()) {
+                std::getline(in, savedId);
+            }
+        }
+        bool restored = false;
+        if (!savedId.empty()) {
+            restored = setDefaultPlaybackDevice(savedId);
+        }
+        clearRecoveryDeviceId();
+        return restored;
     }
 };
 

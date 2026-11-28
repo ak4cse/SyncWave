@@ -261,6 +261,57 @@ bool AudioEngine::startCapture(const AudioDevice& captureDevice, const std::vect
     return true;
 }
 
+bool AudioEngine::startProcessLoopbackCapture(const std::vector<AudioDevice>& outputDevices) {
+    stop();
+    isCaptureMode_ = true;
+
+    if (outputDevices.empty()) {
+        return false;
+    }
+
+    if (!capture_->openProcessLoopback(0)) {
+        return false;
+    }
+    if (!capture_->initialize()) {
+        capture_->close();
+        return false;
+    }
+
+    const auto capFmt = capture_->format();
+    masterBus_.initialize(capFmt, capFmt.sampleRate);
+    masterBus_.reset();
+
+    router_.clearOutputs();
+    for (const auto& dev : outputDevices) {
+        router_.addOutput(dev);
+    }
+
+    if (!router_.initializeOutputs(capFmt.sampleRate, capFmt.channels)) {
+        capture_->close();
+        router_.closeOutputs();
+        return false;
+    }
+
+    applyPendingSync();
+
+    if (!router_.startOutputs()) {
+        stop();
+        return false;
+    }
+
+    bool capStarted = capture_->start([this](const float* sourceBuffer, uint32_t frameCount, const AudioFormat& /*format*/) {
+        masterBus_.write(sourceBuffer, frameCount);
+        router_.dispatch(masterBus_);
+    });
+
+    if (!capStarted) {
+        stop();
+        return false;
+    }
+
+    return true;
+}
+
 void AudioEngine::onDeviceDisconnected(const std::string& deviceId) {
     router_.onDeviceDisconnected(deviceId);
 }

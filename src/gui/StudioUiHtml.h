@@ -681,7 +681,10 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
 
     <div class="section-head">
       <span class="section-title">Output Endpoints</span>
-      <span class="section-sub">Independent hardware master volume (50% default, auto-saved).</span>
+      <span style="display:flex;align-items:center;gap:10px;">
+        <span class="section-sub">50% default hardware volume, auto-saved.</span>
+        <button class="mini-btn" id="btnTestClick" title="Play a short crisp click across all enabled outputs to test sync">Test Click</button>
+      </span>
     </div>
 
     <div class="device-list" id="deviceList"></div>
@@ -1100,6 +1103,13 @@ inline constexpr const char* kStudioUiHtml = R"HTML(<!DOCTYPE html>
 
   document.getElementById('btnRefresh').addEventListener('click', () => {
     post({ cmd: 'refreshDevices' });
+  });
+
+  document.getElementById('btnTestClick').addEventListener('click', () => {
+    const outputs = getSelectedOrderedIds();
+    applyAllEndpointVolumes();
+    pushAllDelays();
+    post({ cmd: 'playClick', outputs });
   });
 
   document.getElementById('btnSyncToggle').addEventListener('click', () => {

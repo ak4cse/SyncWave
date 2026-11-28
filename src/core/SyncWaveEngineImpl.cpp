@@ -19,6 +19,10 @@ public:
         deviceManager_ = std::make_unique<DeviceManager>();
         audioEngine_ = std::make_unique<AudioEngine>();
 
+        // Crash-safe recovery: if an earlier session exited abruptly after auto-switching
+        // the Windows default playback device, restore it immediately.
+        DefaultAudioSwitcher::recoverIfNeeded();
+
         FILETIME ftCreation, ftExit;
         GetProcessTimes(GetCurrentProcess(), &ftCreation, &ftExit, &lastKernel_, &lastUser_);
         lastCpuSampleTime_ = std::chrono::steady_clock::now();
@@ -124,20 +128,59 @@ public:
                 }
             }
         }
-        if (!captureDev) {
-            lastError_ = "No separate unused playback endpoint found for loopback capture (to avoid feedback, uncheck at least one endpoint such as Steam Streaming Speakers).";
+        std::vector<AudioDevice> outDevs;
+        for (const auto& id : outputIds) {
+            if (auto dev = deviceManager_->getDeviceById(id)) {
+                outDevs.push_back(*dev);
+            }
+        }
+        if (outDevs.empty()) {
+            lastError_ = "No valid output devices selected.";
             return false;
         }
 
-        // Save current default playback device and auto-switch Windows default to captureDev
-        if (auto currentDef = deviceManager_->getDefaultDevice()) {
-            if (currentDef->id != captureDev->id) {
-                originalDefaultDeviceId_ = currentDef->id;
-                if (DefaultAudioSwitcher::setDefaultPlaybackDevice(captureDev->id)) {
-                    autoSwitchedDefault_ = true;
+        // If an unused virtual carrier (e.g. Steam Streaming Speakers) is available,
+        // auto-switch Windows default to it (with crash-safe recovery) so selected physical
+        // devices don't receive un-delayed audio directly from apps.
+        if (captureDev) {
+            if (auto currentDef = deviceManager_->getDefaultDevice()) {
+                if (currentDef->id != captureDev->id) {
+                    originalDefaultDeviceId_ = currentDef->id;
+                    DefaultAudioSwitcher::saveRecoveryDeviceId(originalDefaultDeviceId_);
+                    if (DefaultAudioSwitcher::setDefaultPlaybackDevice(captureDev->id)) {
+                        autoSwitchedDefault_ = true;
+                    } else {
+                        DefaultAudioSwitcher::clearRecoveryDeviceId();
+                    }
                 }
             }
+
+            applySyncSettings();
+            activeSource_ = "SystemAudioLoopback";
+            if (audioEngine_->startCapture(*captureDev, outDevs)) {
+                applyLiveVolumeAndDelay();
+                lastError_.clear();
+                return true;
+            }
+            restoreDefaultDeviceIfNeeded();
         }
+
+        // Zero-dependency fallback: Windows 10/11 Process Loopback excluding SyncWave's own PID.
+        applySyncSettings();
+        activeSource_ = "ProcessLoopback";
+        if (!audioEngine_->startProcessLoopbackCapture(outDevs)) {
+            lastError_ = "Failed to start system audio capture (neither virtual loopback nor Windows Process Loopback succeeded).";
+            activeSource_ = "None";
+            return false;
+        }
+        applyLiveVolumeAndDelay();
+        lastError_.clear();
+        return true;
+    }
+
+    bool playAlignmentClick(const std::vector<std::string>& outputIds) override {
+        std::lock_guard<std::mutex> lock(engineMutex_);
+        stopInternal();
 
         std::vector<AudioDevice> outDevs;
         for (const auto& id : outputIds) {
@@ -145,18 +188,26 @@ public:
                 outDevs.push_back(*dev);
             }
         }
+        if (outDevs.empty()) {
+            lastError_ = "Please select at least one output device to play the alignment click.";
+            return false;
+        }
 
         applySyncSettings();
-        activeSource_ = "SystemAudioLoopback";
-        if (!audioEngine_->startCapture(*captureDev, outDevs)) {
-            lastError_ = "Failed to start WASAPI loopback capture on " + captureDev->name;
-            restoreDefaultDeviceIfNeeded();
+        PulseParameters params;
+        params.leadInFrames = 4800;        // 100 ms lead-in
+        params.pulseDurationFrames = 96;   // 2.0 ms crisp audible click
+        params.leadOutFrames = 19200;      // 400 ms tail
+        params.peakAmplitude = 0.65f;
+
+        activeSource_ = "AlignmentClick";
+        if (!audioEngine_->startPulse(outDevs, params)) {
+            lastError_ = "Failed to play alignment click.";
             activeSource_ = "None";
             return false;
         }
         applyLiveVolumeAndDelay();
         lastError_.clear();
-        applyLiveVolumeAndDelay();
         return true;
     }
 
@@ -427,6 +478,7 @@ private:
     void restoreDefaultDeviceIfNeeded() {
         if (autoSwitchedDefault_ && !originalDefaultDeviceId_.empty()) {
             DefaultAudioSwitcher::setDefaultPlaybackDevice(originalDefaultDeviceId_);
+            DefaultAudioSwitcher::clearRecoveryDeviceId();
             autoSwitchedDefault_ = false;
             originalDefaultDeviceId_.clear();
         }

@@ -224,6 +224,10 @@ private:
 };
 
 constexpr UINT_PTR kTelemetryTimerId = 1001;
+constexpr UINT WM_TRAYICON = WM_APP + 1;
+constexpr UINT ID_TRAY_SHOW = 2001;
+constexpr UINT ID_TRAY_TOGGLE_SYNC = 2002;
+constexpr UINT ID_TRAY_EXIT = 2003;
 
 } // namespace
 
@@ -321,13 +325,47 @@ LRESULT CALLBACK MainWindow::WndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 LRESULT MainWindow::handleMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE:
+            addTrayIcon();
             initWebView();
             SetTimer(hWnd, kTelemetryTimerId, 250, nullptr);
             return 0;
 
         case WM_SIZE:
-            resizeWebView();
+            if (wParam == SIZE_MINIMIZED) {
+                ShowWindow(hWnd, SW_HIDE);
+            } else {
+                resizeWebView();
+            }
             return 0;
+
+        case WM_TRAYICON:
+            if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+                ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+                resizeWebView();
+            } else if (lParam == WM_RBUTTONUP) {
+                showTrayMenu();
+            }
+            return 0;
+
+        case WM_COMMAND: {
+            UINT cmdId = LOWORD(wParam);
+            if (cmdId == ID_TRAY_SHOW) {
+                ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+                resizeWebView();
+            } else if (cmdId == ID_TRAY_TOGGLE_SYNC && engine_) {
+                if (engine_->isRunning()) {
+                    engine_->stop();
+                } else if (!lastSelectedOutputs_.empty()) {
+                    engine_->startAutoSystemCapture(lastSelectedOutputs_);
+                }
+                pushTelemetryToUi();
+            } else if (cmdId == ID_TRAY_EXIT) {
+                SendMessageW(hWnd, WM_CLOSE, 0, 0);
+            }
+            return 0;
+        }
 
         case WM_GETMINMAXINFO: {
             MINMAXINFO* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
@@ -337,13 +375,14 @@ LRESULT MainWindow::handleMessage(HWND hWnd, UINT message, WPARAM wParam, LPARAM
         }
 
         case WM_TIMER:
-            if (wParam == kTelemetryTimerId) {
+            if (wParam == kTelemetryTimerId && IsWindowVisible(hWnd)) {
                 pushTelemetryToUi();
             }
             return 0;
 
         case WM_CLOSE:
             KillTimer(hWnd, kTelemetryTimerId);
+            removeTrayIcon();
             if (engine_) {
                 engine_->stop();
             }
@@ -432,6 +471,47 @@ void MainWindow::resizeWebView() {
     webViewController_->put_Bounds(bounds);
 }
 
+void MainWindow::addTrayIcon() {
+    if (trayIconAdded_ || !hWnd_) return;
+    trayIcon_ = {};
+    trayIcon_.cbSize = sizeof(NOTIFYICONDATAW);
+    trayIcon_.hWnd = hWnd_;
+    trayIcon_.uID = 1;
+    trayIcon_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    trayIcon_.uCallbackMessage = WM_TRAYICON;
+    trayIcon_.hIcon = LoadIconW(hInstance_, MAKEINTRESOURCEW(1));
+    if (!trayIcon_.hIcon) {
+        trayIcon_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    wcscpy_s(trayIcon_.szTip, L"SyncWave — Multi-Device Audio Sync");
+    trayIconAdded_ = (Shell_NotifyIconW(NIM_ADD, &trayIcon_) != FALSE);
+}
+
+void MainWindow::removeTrayIcon() {
+    if (trayIconAdded_) {
+        Shell_NotifyIconW(NIM_DELETE, &trayIcon_);
+        trayIconAdded_ = false;
+    }
+}
+
+void MainWindow::showTrayMenu() {
+    POINT pt = {};
+    GetCursorPos(&pt);
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, L"Open SyncWave");
+    bool running = engine_ && engine_->isRunning();
+    AppendMenuW(menu, MF_STRING, ID_TRAY_TOGGLE_SYNC, running ? L"Stop Sync" : L"Start Sync");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"Exit (Restore Windows Audio)");
+
+    SetForegroundWindow(hWnd_);
+    TrackPopupMenu(menu, TPM_BOTTOMALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, hWnd_, nullptr);
+    PostMessageW(hWnd_, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+}
+
 void MainWindow::sendJsonToUi(const std::string& json) {
     if (!webView_) return;
     std::wstring wJson = utf8ToWide(json);
@@ -456,8 +536,18 @@ void MainWindow::onWebMessageReceived(const std::wstring& messageJson) {
             engine_->setSyncMode(mode);
         }
         auto outputs = extractJsonStringArray(json, "outputs");
+        lastSelectedOutputs_ = outputs;
         bool ok = engine_->startAutoSystemCapture(outputs);
         if (!ok) {
+            std::string err = engine_->getLastError();
+            sendJsonToUi("{\"type\":\"error\",\"message\":\"" + escapeJson(err) + "\"}");
+        } else {
+            sendJsonToUi("{\"type\":\"error\",\"message\":\"\"}");
+        }
+        pushTelemetryToUi();
+    } else if (cmd == "playClick") {
+        auto outputs = extractJsonStringArray(json, "outputs");
+        if (!engine_->playAlignmentClick(outputs)) {
             std::string err = engine_->getLastError();
             sendJsonToUi("{\"type\":\"error\",\"message\":\"" + escapeJson(err) + "\"}");
         } else {

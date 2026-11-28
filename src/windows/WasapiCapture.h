@@ -37,6 +37,9 @@ public:
     // Open audio render endpoint for loopback capture by opaque ID (empty string = default console render endpoint)
     bool open(const std::string& deviceId = "");
 
+    // Open Windows 10/11 Application Process Loopback excluding excludePid (0 = current process)
+    bool openProcessLoopback(uint32_t excludePid = 0);
+
     // Query mix format and initialize WASAPI audio client in shared loopback mode
     bool initialize();
 

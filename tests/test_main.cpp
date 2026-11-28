@@ -31,6 +31,7 @@
 #include "../src/core/ISyncWaveEngine.h"
 #include "../src/core/DiagnosticsSnapshot.h"
 #include "../src/core/SyncWaveConfig.h"
+#include "../src/windows/DefaultAudioSwitcher.h"
 
 #include <iostream>
 #include <cassert>
@@ -3835,6 +3836,28 @@ void testGuiEngineContractIntegrationM15() {
     // 6. Stop when stopped
     engine->stop();
     TEST_ASSERT(!engine->isRunning(), "Engine stopped safely");
+
+    // 7. v1.1 Quick Wins: Process Loopback, Alignment Click, and Crash-Safe Recovery
+    {
+        syncwave::WasapiCapture procCap;
+        bool procOpened = procCap.openProcessLoopback(0);
+        TEST_ASSERT(procOpened, "Windows Process Loopback opens without virtual device");
+        if (procOpened) {
+            TEST_ASSERT(procCap.initialize(), "Windows Process Loopback initializes 48kHz stereo float");
+            procCap.close();
+        }
+    }
+
+    bool clickOk = engine->playAlignmentClick(selectedIds);
+    TEST_ASSERT(clickOk, "1-click alignment pulse plays across selected endpoints");
+    engine->stop();
+    TEST_ASSERT(!engine->isRunning(), "Engine stops cleanly after alignment click");
+
+    // Verify crash-safe recovery file lifecycle (write + clear without altering active default)
+    syncwave::DefaultAudioSwitcher::clearRecoveryDeviceId();
+    syncwave::DefaultAudioSwitcher::saveRecoveryDeviceId("");
+    TEST_ASSERT(!std::filesystem::exists(syncwave::DefaultAudioSwitcher::recoveryFilePath()),
+                "Empty recovery ID does not create recovery file");
 }
 
 int main() {

@@ -26,6 +26,7 @@ public:
     virtual bool startTone(const std::vector<std::string>& outputIds, double frequencyHz = 440.0, double volume = 0.25) = 0;
     virtual bool startCapture(const std::string& captureSourceId, const std::vector<std::string>& outputIds) = 0;
     virtual bool startAutoSystemCapture(const std::vector<std::string>& outputIds) = 0;
+    virtual bool playAlignmentClick(const std::vector<std::string>& outputIds) = 0;
     virtual bool startMedia(const std::string& filePathOrUrl, const std::vector<std::string>& outputIds) = 0;
     virtual void stop() = 0;
     virtual void pause() = 0;
